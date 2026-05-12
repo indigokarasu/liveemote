@@ -78,6 +78,15 @@ Recommended dataset hygiene for consistency:
 - Avoid mixing different art styles or revised character designs unless you intend the model to learn that variation.
 
 
+
+## Characters, styles, voices, and backgrounds
+
+Each character can declare visual styles, voice defaults, background options, and workflow-to-style rules in `canonical/profile.yaml`. A style is the presentation layer for the same character identity: for example the bundled Indigo sample includes `neutral`, `cyberpunk`, `cozy`, and `glitch`. Each style may set voice pacing/warmth/intensity, renderer prompt metadata, workflow tags, and a default background. Backgrounds can be synchronized to the chosen style or selected independently in the debug UI.
+
+The browser demo exposes dropdowns for Character, Style, Background, and Workflow. Selecting a workflow applies the configured rule, such as `coding -> cyberpunk`, `book_writing -> cozy`, or `debugging -> glitch`. The current implementation keeps the rules explicit in the character profile so future Hermes task classifiers can choose the same style IDs without changing renderer or voice backends.
+
+To run a multi-character test, pass a directory whose immediate children are character folders with their own `canonical/` directories. Passing a single character folder still works and shows one character in the dropdown.
+
 ## Launch the WebRTC/browser demo
 
 ```bash

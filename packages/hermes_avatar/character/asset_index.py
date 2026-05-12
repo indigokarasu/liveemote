@@ -8,6 +8,47 @@ SUPPORTED_TRAINING_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 @dataclass
+class VoiceStyleSpec:
+    pace: float = 0.44
+    warmth: float = 0.62
+    intensity: float = 0.35
+    backend: str | None = None
+    reference_audio: str | None = None
+    elevenlabs_voice_id: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BackgroundSpec:
+    id: str
+    name: str
+    kind: str = "gradient"
+    value: str = "radial-gradient(circle,#374151,#030712)"
+    synced_style_id: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class VisualStyle:
+    id: str
+    name: str
+    description: str = ""
+    voice: VoiceStyleSpec = field(default_factory=VoiceStyleSpec)
+    default_background_id: str | None = None
+    workflow_tags: list[str] = field(default_factory=list)
+    renderer_prompt: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class WorkflowStyleRule:
+    workflow: str
+    style_id: str
+    background_id: str | None = None
+    description: str = ""
+
+
+@dataclass
 class EmoteAsset:
     id: str
     path: str
@@ -32,15 +73,24 @@ class TrainingReference:
 class CharacterIndex:
     character_id: str
     canonical_image: str
+    display_name: str | None = None
     voice_reference: str | None = None
     elevenlabs_voice_id: str | None = None
     emotes: list[EmoteAsset] = field(default_factory=list)
     training_references: list[TrainingReference] = field(default_factory=list)
+    styles: list[VisualStyle] = field(default_factory=list)
+    backgrounds: list[BackgroundSpec] = field(default_factory=list)
+    workflow_style_rules: list[WorkflowStyleRule] = field(default_factory=list)
+    default_style_id: str = "neutral"
+    default_background_id: str | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["emotes"] = [asdict(e) for e in self.emotes]
         data["training_references"] = [asdict(ref) for ref in self.training_references]
+        data["styles"] = [asdict(style) for style in self.styles]
+        data["backgrounds"] = [asdict(background) for background in self.backgrounds]
+        data["workflow_style_rules"] = [asdict(rule) for rule in self.workflow_style_rules]
         return data
 
     def write_json(self, path: str | Path) -> None:
@@ -48,6 +98,16 @@ class CharacterIndex:
 
     def find_emote(self, state: str) -> EmoteAsset | None:
         return next((e for e in self.emotes if e.state == state), None)
+
+    def find_style(self, style_id: str | None) -> VisualStyle | None:
+        if style_id is None:
+            return None
+        return next((style for style in self.styles if style.id == style_id), None)
+
+    def find_background(self, background_id: str | None) -> BackgroundSpec | None:
+        if background_id is None:
+            return None
+        return next((bg for bg in self.backgrounds if bg.id == background_id), None)
 
     def expression_references(self, state: str | None = None) -> list[TrainingReference]:
         return [
