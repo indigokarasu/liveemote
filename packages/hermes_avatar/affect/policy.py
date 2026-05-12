@@ -58,9 +58,12 @@ class AffectRuntime:
         center = data.get("face_center") or (0.5, 0.5)
         centered = abs(center[0] - 0.5) < 0.22 and abs(center[1] - 0.5) < 0.22
         self.user.gaze_direction = "toward_user" if self.user.face_detected and centered else "away"
+        self.user.gaze_confidence = ema(self.user.gaze_confidence, float(data.get("gaze_confidence", 0.85 if self.user.face_detected else 0.0)), a)
         target_attention = 0.9 if self.user.face_detected and centered else 0.35 if self.user.face_detected else 0.0
         self.user.attention = ema(self.user.attention, target_attention, a)
         dominant, conf = self._dominant_expression(data.get("expression", {}))
+        conf = max(conf, float(data.get("emotion_confidence", 0.0)))
+        self.user.emotion_confidence = ema(self.user.emotion_confidence, conf, a)
         self.user.dominant_expression = self.expression_latch.update(dominant, conf, int(data.get("timestamp_ms", self._now())))
         expression_arousal = (
             0.65
@@ -111,11 +114,13 @@ class AffectRuntime:
         self.conversation.interruption_risk = interruption_risk(self.user, self.conversation)
         if self.conversation.turn_state == "assistant_speaking":
             self.avatar = speaking_behavior(self.user, self.hermes_tags, self.emote_lookup("speaking_optional"))
+            self.avatar.full_body_pose = "presenting"
         elif self.user.speaking:
             self.avatar = listening_behavior(self.user, self.conversation, self.emote_lookup("listening"))
+            self.avatar.full_body_pose = "attentive_lean"
         elif self.conversation.turn_state == "assistant_thinking":
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="thinking", affect=affect, gaze_target=self.user.gaze_direction, emote_id=self.emote_lookup("thinking"), intensity=intensity, delay_ms=reaction_delay(self.mode, self.config))
+            self.avatar = AvatarBehaviorState(mode="thinking", affect=affect, gaze_target=self.user.gaze_direction, emote_id=self.emote_lookup("thinking"), intensity=intensity, delay_ms=reaction_delay(self.mode, self.config), full_body_pose="thinking_shift")
         else:
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
             self.avatar = AvatarBehaviorState(mode="idle", affect=affect, gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward", emote_id=self.emote_lookup("neutral"), intensity=intensity, mirror_strength=self.config.behavior.mirroring_strength if self.mode == "mirror" else 0.0, delay_ms=reaction_delay(self.mode, self.config))

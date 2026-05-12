@@ -2,6 +2,7 @@ from __future__ import annotations
 import time
 from hermes_avatar.affect.policy import AffectRuntime
 from hermes_avatar.affect.state import AvatarBehaviorState
+from pathlib import Path
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.config.schema import AppConfig, load_config
 from hermes_avatar.protocol.hermes_bridge import HermesBridge
@@ -16,6 +17,7 @@ from hermes_avatar.demo.meeting_join import MeetingJoinService
 class DemoOrchestrator:
     def __init__(self, character: str, renderer: str = "livetalking", voice_backend: str = "luxtts", hermes_mode: str = "fake", config: AppConfig | None = None) -> None:
         self.config = config or load_config()
+        self.character_root = Path(character)
         self.index = build_asset_index(character)
         lookup = lambda state: (self.index.find_emote(state).id if self.index.find_emote(state) else None)
         self.runtime = AffectRuntime(self.config, emote_lookup=lookup)
@@ -34,7 +36,30 @@ class DemoOrchestrator:
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
     def status(self) -> dict:
-        return {"user": self.runtime.user.to_dict(), "conversation": self.runtime.conversation.to_dict(), "avatar": self.runtime.avatar.to_dict(), "mode_policy": self.runtime.mode, "hermes_response_text": self.last_response_text, "character_id": self.index.character_id, "meeting": self.meeting.status()}
+        return {"user": self.runtime.user.to_dict(), "conversation": self.runtime.conversation.to_dict(), "avatar": self.runtime.avatar.to_dict(), "mode_policy": self.runtime.mode, "hermes_response_text": self.last_response_text, "character_id": self.index.character_id, "characters": self.available_characters(), "capabilities": self.capabilities(), "meeting": self.meeting.status()}
+
+    def available_characters(self) -> list[dict]:
+        roots = [self.character_root]
+        parent = self.character_root.parent
+        if parent.exists():
+            roots.extend(p for p in parent.iterdir() if p.is_dir() and p != self.character_root)
+        seen = set()
+        items = []
+        for root in roots:
+            if root in seen or not (root / "canonical").exists():
+                continue
+            seen.add(root)
+            try:
+                idx = build_asset_index(str(root))
+                items.append({"character_id": idx.character_id, "path": str(root), "emote_count": len(idx.emotes)})
+            except Exception:
+                continue
+        return items
+
+    def capabilities(self) -> dict:
+        renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
+        voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
+        return {"renderer": renderer_caps, "voice": voice_caps, "mobile_layout": True, "multi_character_scene": True, "cloud_ready": True}
 
     def apply_event(self, event: dict) -> dict:
         behavior = self.runtime.consume(event)
@@ -77,3 +102,9 @@ class DemoOrchestrator:
     def leave_meeting(self) -> dict:
         meeting = self.meeting.leave()
         return {**self.status(), "meeting": meeting}
+
+    def select_character(self, character_path: str) -> dict:
+        self.index = build_asset_index(character_path)
+        self.character_root = Path(character_path)
+        self.renderer.load_character(self.index)
+        return self.status()
