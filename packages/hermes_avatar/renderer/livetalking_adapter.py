@@ -43,20 +43,8 @@ class LiveTalkingAdapter(Renderer):
         self.last_behavior: AvatarBehaviorState | None = None
         self.endpoint_status: dict[str, dict[str, Any]] = {}
         self.last_latency_ms: int | None = None
-
-    def capabilities(self) -> dict:
-        online = self._request("health", {}, optional=True).get("ok", False)
-        return {
-            "base_url": self.base_url,
-            "vendor_dir_exists": self.vendor_dir.exists(),
-            "online": online,
-            "endpoint_status": self.endpoint_status,
-            "last_latency_ms": self.last_latency_ms,
-        }
         self.active_style: VisualStyle | None = None
         self.active_background: BackgroundSpec | None = None
-        self.endpoint_status: dict[str, dict[str, Any]] = {}
-        self.last_latency_ms: int | None = None
 
     def capabilities(self) -> dict:
         online = self._request("health", {}, optional=True).get("ok", False)
@@ -81,20 +69,6 @@ class LiveTalkingAdapter(Renderer):
         self.active_background = background
         self._request(
             "theme",
-            {
-                "character_id": character_index.character_id,
-                "style": asdict(style) if style else None,
-                "background": asdict(background) if background else None,
-            },
-            optional=True,
-        )
-
-    def set_theme(self, character_index: CharacterIndex, style: VisualStyle | None, background: BackgroundSpec | None) -> None:
-        self.character_index = character_index
-        self.active_style = style
-        self.active_background = background
-        self._post(
-            "/avatar/theme",
             {
                 "character_id": character_index.character_id,
                 "style": asdict(style) if style else None,

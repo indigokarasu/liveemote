@@ -27,6 +27,12 @@ class HermesResponseEvent(BaseEvent):
     text: str
     tags: dict[str, Any] = Field(default_factory=dict)
 
+
+class AgentResponseEvent(BaseEvent):
+    type: Literal["agent.response"] = "agent.response"
+    text: str
+    tags: dict[str, Any] = Field(default_factory=dict)
+
 class AvatarBehaviorEvent(BaseEvent):
     type: Literal["avatar.behavior"] = "avatar.behavior"
     mode: str
@@ -49,6 +55,7 @@ def parse_event(payload: dict[str, Any]) -> BaseEvent:
         "perception.frame": PerceptionFrameEvent,
         "audio.vad": AudioVADEvent,
         "hermes.response": HermesResponseEvent,
+        "agent.response": AgentResponseEvent,
         "avatar.behavior": AvatarBehaviorEvent,
         "avatar.speak": AvatarSpeakEvent,
     }
