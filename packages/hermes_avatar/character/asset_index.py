@@ -85,13 +85,7 @@ class CharacterIndex:
     default_background_id: str | None = None
 
     def to_dict(self) -> dict:
-        data = asdict(self)
-        data["emotes"] = [asdict(e) for e in self.emotes]
-        data["training_references"] = [asdict(ref) for ref in self.training_references]
-        data["styles"] = [asdict(style) for style in self.styles]
-        data["backgrounds"] = [asdict(background) for background in self.backgrounds]
-        data["workflow_style_rules"] = [asdict(rule) for rule in self.workflow_style_rules]
-        return data
+        return asdict(self)
 
     def write_json(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2))
@@ -109,9 +103,12 @@ class CharacterIndex:
             return None
         return next((bg for bg in self.backgrounds if bg.id == background_id), None)
 
-    def expression_references(self, state: str | None = None) -> list[TrainingReference]:
+    def expression_references(
+        self, state: str | None = None
+    ) -> list[TrainingReference]:
         return [
             ref
             for ref in self.training_references
-            if ref.role == "expression_reference" and (state is None or ref.state == state)
+            if ref.role == "expression_reference"
+            and (state is None or ref.state == state)
         ]

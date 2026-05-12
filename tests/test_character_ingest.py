@@ -8,7 +8,9 @@ def test_default_character_index_builds():
     index = build_asset_index("character_input")
     assert index.character_id == "indigo"
     assert index.canonical_image.endswith("canonical.png")
-    assert index.voice_reference and index.voice_reference.endswith("voice_reference.wav")
+    assert index.voice_reference and index.voice_reference.endswith(
+        "voice_reference.wav"
+    )
     assert any(e.state == "listening" for e in index.emotes)
     assert index.training_references[0].role == "identity_anchor"
     assert index.training_references[0].path.endswith("canonical.png")
@@ -20,6 +22,26 @@ def test_character_styles_backgrounds_and_workflow_rules_load():
     index = build_asset_index("character_input")
     assert index.default_style_id == "neutral"
     assert index.find_style("cyberpunk").default_background_id == "cyberpunk-city"
-    assert index.find_style("cozy").voice.warmth > index.find_style("glitch").voice.warmth
+    assert (
+        index.find_style("cozy").voice.warmth > index.find_style("glitch").voice.warmth
+    )
     assert index.find_background("glitch-grid").synced_style_id == "glitch"
-    assert any(rule.workflow == "debugging" and rule.style_id == "glitch" for rule in index.workflow_style_rules)
+    assert any(
+        rule.workflow == "debugging" and rule.style_id == "glitch"
+        for rule in index.workflow_style_rules
+    )
+
+
+def test_emote_ids_ignore_unsupported_files(tmp_path):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir(parents=True)
+    (canonical / "canonical.png").write_bytes(b"png")
+    emote_dir = tmp_path / "emotes" / "happy"
+    emote_dir.mkdir(parents=True)
+    (emote_dir / "01.png").write_bytes(b"png")
+    (emote_dir / "notes.txt").write_text("not an emote")
+    (emote_dir / "02.webp").write_bytes(b"webp")
+
+    index = build_asset_index(tmp_path)
+
+    assert [emote.id for emote in index.emotes] == ["happy_001", "happy_002"]
