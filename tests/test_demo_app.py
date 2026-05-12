@@ -87,3 +87,26 @@ def test_offline_speak_test_does_not_synthesize_speech():
     payload = response.json()
     assert payload["speech"] is None
     assert payload["agent_response_text"] == ""
+
+
+class DeepLiveCamArgs:
+    character = "./character_input"
+    renderer = "deeplivecam"
+    voice_backend = "none"
+    transport = "webrtc"
+    agent_mode = "offline"
+    agent_url = None
+    agent_harness = "none"
+
+
+def test_deeplivecam_renderer_uses_canonical_face_source():
+    client = TestClient(create_app(DeepLiveCamArgs()))
+    payload = client.get("/api/status").json()
+    renderer = payload["capabilities"]["renderer"]
+
+    assert renderer["backend"] == "deeplivecam"
+    assert renderer["enabled"] is True
+    assert renderer["replacement_active"] is True
+    assert renderer["source_reference_role"] == "identity_anchor"
+    assert renderer["source_image_path"].endswith("canonical/canonical.png")
+    assert renderer["error"] is None

@@ -58,7 +58,7 @@ class DemoOrchestrator:
         self.runtime = self._new_runtime()
         self.agent = AgentBridge(agent_mode, agent_url or self.config.hermes.url, agent_harness)
         self.hermes = self.agent  # Backward-compatible alias for older status/UI naming.
-        self.renderer = DeepLiveCamAdapter() if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
+        self.renderer = DeepLiveCamAdapter(enabled=True) if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
         self.renderer.load_character(self.index)
         self._notify_renderer_theme()
         self.voice_backend_name = voice_backend
