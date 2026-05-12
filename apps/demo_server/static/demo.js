@@ -94,6 +94,10 @@ function update(s) {
   const background = s.active_background || null;
   els.mode.textContent = a.mode || '-';
   els.affect.textContent = a.affect || '-';
+  const style = s.active_style || null;
+  const background = s.active_background || null;
+  els.mode.textContent = a.mode;
+  els.affect.textContent = a.affect;
   els.vad.textContent = u.speaking ? 'speaking' : 'silent';
   els.face.textContent = String(Boolean(u.face_detected));
   els.gaze.textContent = a.gaze_target || '-';
@@ -103,6 +107,7 @@ function update(s) {
   els.rendererStatus.textContent = c.renderer?.online ? `online (${c.renderer.last_latency_ms ?? 0} ms)` : 'offline / contract checked';
   els.emote.textContent = a.emote_id || '-';
   els.policy.textContent = s.mode_policy || '-';
+  els.policy.textContent = s.mode_policy;
   els.character.textContent = s.character_name || s.character_id || '-';
   els.style.textContent = style ? `${style.name} (${style.id})` : '-';
   els.background.textContent = background ? `${background.name} (${background.id})` : '-';

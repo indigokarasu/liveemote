@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -69,6 +68,20 @@ class LiveTalkingAdapter(Renderer):
         self.active_background = background
         self._request(
             "theme",
+            {
+                "character_id": character_index.character_id,
+                "style": asdict(style) if style else None,
+                "background": asdict(background) if background else None,
+            },
+            optional=True,
+        )
+
+    def set_theme(self, character_index: CharacterIndex, style: VisualStyle | None, background: BackgroundSpec | None) -> None:
+        self.character_index = character_index
+        self.active_style = style
+        self.active_background = background
+        self._post(
+            "/avatar/theme",
             {
                 "character_id": character_index.character_id,
                 "style": asdict(style) if style else None,
