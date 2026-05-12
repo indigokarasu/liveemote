@@ -1,6 +1,6 @@
 from __future__ import annotations
 from hermes_avatar.affect.state import AvatarBehaviorState
-from hermes_avatar.character.asset_index import CharacterIndex
+from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
 from .base import Renderer
 
 class DeepLiveCamAdapter(Renderer):
@@ -12,6 +12,11 @@ class DeepLiveCamAdapter(Renderer):
 
     def load_character(self, character_index: CharacterIndex) -> None:
         self.character_index = character_index
+
+    def set_theme(self, character_index: CharacterIndex, style: VisualStyle | None, background: BackgroundSpec | None) -> None:
+        self.character_index = character_index
+        self.active_style = style
+        self.active_background = background
 
     def set_behavior(self, behavior: AvatarBehaviorState) -> None:
         if behavior.lip_sync_enabled:
