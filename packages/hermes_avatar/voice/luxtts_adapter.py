@@ -91,7 +91,7 @@ class LuxTTSAdapter(VoiceBackend):
             "vendor_dir": shlex.quote(str(self.vendor_dir)),
         }
         command = self.command_template.format(**values)
-        subprocess.run(command, shell=True, cwd=Path.cwd(), check=True, timeout=120)
+        subprocess.run(shlex.split(command), cwd=Path.cwd(), check=True, timeout=120)
         if not output.exists() or output.stat().st_size == 0:
             raise RuntimeError("LuxTTS command completed without producing a WAV")
 

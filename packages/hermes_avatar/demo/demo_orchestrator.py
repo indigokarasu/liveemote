@@ -59,7 +59,7 @@ class DemoOrchestrator:
     def capabilities(self) -> dict:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
         voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
-        return {"renderer": renderer_caps, "voice": voice_caps, "mobile_layout": True, "multi_character_scene": True, "cloud_ready": True}
+        return {"renderer": renderer_caps, "voice": voice_caps, "mobile_layout": True, "multi_character_switching": True, "cloud_manifest_available": True}
 
     def apply_event(self, event: dict) -> dict:
         behavior = self.runtime.consume(event)
@@ -102,6 +102,9 @@ class DemoOrchestrator:
     def leave_meeting(self) -> dict:
         meeting = self.meeting.leave()
         return {**self.status(), "meeting": meeting}
+
+    def safe_audio_roots(self) -> list[Path]:
+        return [Path(self.config.voice.cache_dir).resolve()]
 
     def select_character(self, character_path: str) -> dict:
         self.index = build_asset_index(character_path)

@@ -181,7 +181,7 @@ Deep-Live-Cam is optional and off by default. Do not use a real person's face id
 
 ## Multi-character, mobile, and cloud deployment
 
-The browser UI discovers sibling character folders with `canonical/` assets and can switch characters through `/api/character/select` without restarting the server. The CSS layout is responsive for narrow/mobile browser debugging, and `deploy/k8s/demo.yaml` provides a Kubernetes Deployment and Service starter manifest for cloud-hosted demos.
+The browser UI discovers sibling character folders with `canonical/` assets and can switch the active character through `/api/character/select` without restarting the server. The CSS layout is responsive for narrow/mobile browser debugging. `Dockerfile` plus `deploy/k8s/demo.yaml` provide a container and Kubernetes Deployment/Service starter path for cloud-hosted demos. Generated audio is served only from the configured voice cache.
 
 ## Required commands
 
@@ -210,4 +210,4 @@ The check fails if cloned vendor payloads, nested `.git` metadata, binary files,
 - LiveTalking integration exposes endpoint-by-endpoint capability and latency reporting instead of silent best-effort no-ops.
 - Browser perception uses local camera/audio APIs to send face-box, gaze-confidence, expression-confidence, and VAD telemetry without raw frame upload.
 - The affect state carries emotion confidence, gaze confidence, TTS latency, and full-body pose hints used by the browser avatar preview.
-- Responsive browser controls, character switching, and a Kubernetes starter manifest are included for mobile debugging, multi-character scenes, and cloud demo deployment.
+- Responsive browser controls, runtime character switching, a Dockerfile, and a Kubernetes starter manifest are included for mobile debugging, multi-character demo workflows, and cloud demo deployment.
