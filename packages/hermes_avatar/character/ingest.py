@@ -7,6 +7,7 @@ from .asset_index import (
     EmoteAsset,
     SUPPORTED_EMOTE_EXTS,
     SUPPORTED_TRAINING_IMAGE_EXTS,
+    SUPPORTED_VIDEO_EMOTE_EXTS,
     TrainingReference,
     VisualStyle,
     VoiceStyleSpec,
@@ -201,6 +202,119 @@ def _workflow_rules_from_profile(profile: dict) -> list[WorkflowStyleRule]:
     ]
 
 
+def _state_counters(index: CharacterIndex) -> dict[str, int]:
+    counters: dict[str, int] = {}
+    for emote in index.emotes:
+        prefix = f"{emote.state}_"
+        if emote.id.startswith(prefix) and emote.id[len(prefix) :].isdigit():
+            counters[emote.state] = max(
+                counters.get(emote.state, 0), int(emote.id[len(prefix) :])
+            )
+    return counters
+
+
+def _next_emote_id(state: str, counters: dict[str, int], used_ids: set[str]) -> str:
+    count = counters.get(state, 0)
+    while True:
+        count += 1
+        emote_id = f"{state}_{count:03d}"
+        if emote_id not in used_ids:
+            counters[state] = count
+            return emote_id
+
+
+def _append_emote(
+    index: CharacterIndex,
+    path: Path,
+    state: str,
+    counters: dict[str, int],
+    used_ids: set[str],
+    expression_ref_counters: dict[str, int],
+    *,
+    emote_id: str | None = None,
+    variant: str | None = None,
+    intensity: float = 0.35,
+    loopable: bool | None = None,
+    duration_ms: int | None = None,
+    priority: int = 0,
+    tags: list[str] | None = None,
+    training_reference: bool | None = None,
+) -> None:
+    suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_EMOTE_EXTS:
+        raise ValueError(f"Unsupported emote file type for {path}: {suffix}")
+    if emote_id is None:
+        emote_id = _next_emote_id(state, counters, used_ids)
+    elif emote_id in used_ids:
+        raise ValueError(f"Duplicate emote id in character profile: {emote_id}")
+
+    base_tags = tags_for(path, state)
+    if variant:
+        base_tags.append(variant)
+    merged_tags = list(dict.fromkeys([*base_tags, *(tags or [])]))
+    is_video = suffix in SUPPORTED_VIDEO_EMOTE_EXTS
+    index.emotes.append(
+        EmoteAsset(
+            id=emote_id,
+            path=str(path),
+            state=state,
+            variant=variant,
+            intensity=intensity,
+            loopable=is_video if loopable is None else loopable,
+            duration_ms=2800 if is_video and duration_ms is None else duration_ms,
+            priority=priority,
+            tags=merged_tags,
+        )
+    )
+    used_ids.add(emote_id)
+
+    should_add_training_reference = (
+        suffix in SUPPORTED_TRAINING_IMAGE_EXTS
+        if training_reference is None
+        else training_reference
+    )
+    if should_add_training_reference and suffix in SUPPORTED_TRAINING_IMAGE_EXTS:
+        expression_ref_counters[state] = expression_ref_counters.get(state, 0) + 1
+        index.training_references.append(
+            TrainingReference(
+                id=f"{state}_expression_{expression_ref_counters[state]:03d}",
+                path=str(path),
+                role="expression_reference",
+                state=state,
+                weight=_reference_weight(state),
+                tags=merged_tags + ["expression", state],
+            )
+        )
+
+
+def _profile_emote_entries(profile: dict) -> list[dict]:
+    entries: list[dict] = []
+    for data in profile.get("emotes", []):
+        variants = data.get("variants")
+        if not variants:
+            entries.append(data)
+            continue
+
+        shared = {key: value for key, value in data.items() if key != "variants"}
+        for variant_data in variants:
+            merged = {**shared, **variant_data}
+            merged["state"] = variant_data.get("state", shared.get("state"))
+            merged["variant"] = (
+                variant_data.get("variant")
+                or variant_data.get("name")
+                or shared.get("variant")
+            )
+            entries.append(merged)
+    return entries
+
+
+def _resolve_profile_emote_path(root: Path, raw_path: str) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = root / path
+    return path
+
+
 def build_asset_index(
     root: str | Path, character_id: str | None = None
 ) -> CharacterIndex:
@@ -252,11 +366,54 @@ def build_asset_index(
             )
         ],
     )
+    counters = _state_counters(index)
+    used_ids = {emote.id for emote in index.emotes}
+    expression_ref_counters: dict[str, int] = {}
+
     emote_root = root / "emotes"
     video_exts = {".mp4", ".mov", ".webm"}
     if emote_root.exists():
         for state_dir in sorted(p for p in emote_root.iterdir() if p.is_dir()):
             state = state_dir.name
+            for asset in sorted(state_dir.iterdir()):
+                if (
+                    not asset.is_file()
+                    or asset.suffix.lower() not in SUPPORTED_EMOTE_EXTS
+                ):
+                    continue
+                _append_emote(
+                    index,
+                    asset,
+                    state,
+                    counters,
+                    used_ids,
+                    expression_ref_counters,
+                )
+
+    for data in _profile_emote_entries(profile):
+        state = data.get("state")
+        raw_path = data.get("path") or data.get("file")
+        if not state or not raw_path:
+            raise ValueError("Profile emotes require both 'state' and 'path'")
+        asset = _resolve_profile_emote_path(root, raw_path)
+        if not asset.is_file():
+            raise ValueError(f"Profile emote file does not exist: {asset}")
+        _append_emote(
+            index,
+            asset,
+            str(state),
+            counters,
+            used_ids,
+            expression_ref_counters,
+            emote_id=data.get("id"),
+            variant=data.get("variant"),
+            intensity=float(data.get("intensity", 0.35)),
+            loopable=data.get("loopable"),
+            duration_ms=data.get("duration_ms"),
+            priority=int(data.get("priority", 0)),
+            tags=list(data.get("tags", [])),
+            training_reference=data.get("training_reference"),
+        )
             expression_ref_idx = 1
             emote_idx = 1
             for asset in sorted(state_dir.iterdir()):

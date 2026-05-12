@@ -3,8 +3,9 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 import json
 
-SUPPORTED_EMOTE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm"}
 SUPPORTED_TRAINING_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_VIDEO_EMOTE_EXTS = {".mp4", ".mov", ".webm"}
+SUPPORTED_EMOTE_EXTS = SUPPORTED_TRAINING_IMAGE_EXTS | SUPPORTED_VIDEO_EMOTE_EXTS
 
 
 @dataclass
@@ -53,9 +54,11 @@ class EmoteAsset:
     id: str
     path: str
     state: str
+    variant: str | None = None
     intensity: float = 0.35
     loopable: bool = True
     duration_ms: int | None = None
+    priority: int = 0
     tags: list[str] = field(default_factory=list)
 
 
@@ -90,8 +93,26 @@ class CharacterIndex:
     def write_json(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2))
 
-    def find_emote(self, state: str) -> EmoteAsset | None:
-        return next((e for e in self.emotes if e.state == state), None)
+    def emotes_for(
+        self,
+        state: str,
+        variant: str | None = None,
+        tags: set[str] | None = None,
+    ) -> list[EmoteAsset]:
+        matches = [emote for emote in self.emotes if emote.state == state]
+        if variant is not None:
+            matches = [emote for emote in matches if emote.variant == variant]
+        if tags:
+            matches = [emote for emote in matches if tags.issubset(set(emote.tags))]
+        return sorted(matches, key=lambda emote: (-emote.priority, emote.id))
+
+    def find_emote(
+        self,
+        state: str,
+        variant: str | None = None,
+        tags: set[str] | None = None,
+    ) -> EmoteAsset | None:
+        return next(iter(self.emotes_for(state, variant=variant, tags=tags)), None)
 
     def find_style(self, style_id: str | None) -> VisualStyle | None:
         if style_id is None:
