@@ -1,12 +1,30 @@
 const els = {
-  mode: q('#mode'), affect: q('#affect'), vad: q('#vad'), face: q('#face'), gaze: q('#gaze'),
-  confidence: q('#confidence'), bodyPose: q('#bodyPose'), voiceStatus: q('#voiceStatus'), rendererStatus: q('#rendererStatus'),
-  emote: q('#emote'), policy: q('#policy'), response: q('#response'), raw: q('#raw'), avatar: q('#avatarCanvas'),
-  meetingStatus: q('#meetingStatus'), meetingLatency: q('#meetingLatency'), meetingDetail: q('#meetingDetail'),
-  meetingUrl: q('#meetingUrl'), meetingName: q('#meetingName'), characterSelect: q('#characterSelect'), speech: q('#speech'),
+  mode: q('#mode'),
+  affect: q('#affect'),
+  vad: q('#vad'),
+  face: q('#face'),
+  gaze: q('#gaze'),
+  emote: q('#emote'),
+  policy: q('#policy'),
+  character: q('#character'),
+  style: q('#style'),
+  background: q('#background'),
+  response: q('#response'),
+  raw: q('#raw'),
+  avatar: q('#avatarCanvas'),
+  characterSelect: q('#characterSelect'),
+  styleSelect: q('#styleSelect'),
+  backgroundSelect: q('#backgroundSelect'),
+  syncBackground: q('#syncBackground'),
+  workflowSelect: q('#workflowSelect'),
+  meetingStatus: q('#meetingStatus'),
+  meetingLatency: q('#meetingLatency'),
+  meetingDetail: q('#meetingDetail'),
+  meetingUrl: q('#meetingUrl'),
+  meetingName: q('#meetingName'),
 };
 let policy = 'reflect';
-let audioContext, analyser, audioData, faceDetector;
+let updatingControls = false;
 
 function q(s) { return document.querySelector(s); }
 
@@ -17,10 +35,52 @@ async function post(url, body = {}) {
   return update(payload);
 }
 
+function optionLabel(item) {
+  return item.name || item.id || item.workflow;
+}
+
+function fillSelect(select, items, value, placeholder = null) {
+  const next = [];
+  if (placeholder) next.push(`<option value="">${placeholder}</option>`);
+  for (const item of items) {
+    const id = item.id || item.workflow;
+    next.push(`<option value="${id}">${optionLabel(item)}</option>`);
+  }
+  const html = next.join('');
+  if (select.innerHTML !== html) select.innerHTML = html;
+  select.value = value || '';
+}
+
+function applyAvatarTheme(style, background) {
+  els.avatar.dataset.style = style?.id || '';
+  els.avatar.dataset.background = background?.id || '';
+  if (background?.kind === 'color' || background?.kind === 'gradient') {
+    els.avatar.style.background = background.value;
+  } else if (background?.kind === 'image') {
+    els.avatar.style.background = `center / cover no-repeat url(${background.value})`;
+  } else {
+    els.avatar.style.background = '';
+  }
+}
+
+function updateControls(s) {
+  updatingControls = true;
+  fillSelect(els.characterSelect, s.characters || [], s.character_id);
+  fillSelect(els.styleSelect, s.styles || [], s.active_style_id);
+  fillSelect(els.backgroundSelect, s.backgrounds || [], s.active_background_id);
+  fillSelect(els.workflowSelect, s.workflow_style_rules || [], '', 'Apply workflow…');
+  els.syncBackground.checked = Boolean(s.sync_background_to_style);
+  updatingControls = false;
+}
+
 function update(s) {
-  const a = s.avatar || {}, u = s.user || {}, m = s.meeting || {}, c = s.capabilities || {};
-  els.mode.textContent = a.mode || '-';
-  els.affect.textContent = a.affect || '-';
+  const a = s.avatar || {};
+  const u = s.user || {};
+  const m = s.meeting || {};
+  const style = s.active_style || null;
+  const background = s.active_background || null;
+  els.mode.textContent = a.mode;
+  els.affect.textContent = a.affect;
   els.vad.textContent = u.speaking ? 'speaking' : 'silent';
   els.face.textContent = String(Boolean(u.face_detected));
   els.gaze.textContent = a.gaze_target || '-';
@@ -29,7 +89,10 @@ function update(s) {
   els.voiceStatus.textContent = `${c.voice?.last_engine || c.voice?.backend || '-'} (${c.voice?.last_latency_ms ?? 0} ms)`;
   els.rendererStatus.textContent = c.renderer?.online ? `online (${c.renderer.last_latency_ms ?? 0} ms)` : 'offline / contract checked';
   els.emote.textContent = a.emote_id || '-';
-  els.policy.textContent = s.mode_policy || '-';
+  els.policy.textContent = s.mode_policy;
+  els.character.textContent = s.character_name || s.character_id || '-';
+  els.style.textContent = style ? `${style.name} (${style.id})` : '-';
+  els.background.textContent = background ? `${background.name} (${background.id})` : '-';
   els.response.textContent = s.hermes_response_text || '';
   els.meetingStatus.textContent = m.status || 'idle';
   els.meetingLatency.textContent = m.estimated_join_latency_ms == null ? '-' : `${m.estimated_join_latency_ms} ms`;
@@ -38,6 +101,8 @@ function update(s) {
   els.avatar.className = a.mode || '';
   updateCharacters(s.characters || [], s.character_id);
   if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
+  applyAvatarTheme(style, background);
+  updateControls(s);
   return s;
 }
 
@@ -60,8 +125,35 @@ async function poll() {
 }
 
 q('#speak').onclick = () => post('/api/speak', {text: 'Demo user turn complete.'});
-q('#toggle').onclick = () => { policy = policy === 'reflect' ? 'mirror' : 'reflect'; post('/api/mode', {mode: policy}); };
-q('#joinMeeting').onclick = async () => { try { await post('/api/meeting/join', {meeting_url: els.meetingUrl.value, display_name: els.meetingName.value}); } catch (e) { els.meetingStatus.textContent = 'error'; els.meetingDetail.textContent = e.message; } };
+q('#toggle').onclick = () => {
+  policy = policy === 'reflect' ? 'mirror' : 'reflect';
+  post('/api/mode', {mode: policy});
+};
+els.characterSelect.onchange = () => {
+  if (!updatingControls) post('/api/character', {character_id: els.characterSelect.value});
+};
+els.styleSelect.onchange = () => {
+  if (!updatingControls) post('/api/style', {style_id: els.styleSelect.value, sync_background: els.syncBackground.checked});
+};
+els.backgroundSelect.onchange = () => {
+  if (!updatingControls) post('/api/background', {background_id: els.backgroundSelect.value, sync_background: false});
+};
+els.syncBackground.onchange = () => {
+  if (!updatingControls && els.syncBackground.checked) {
+    post('/api/style', {style_id: els.styleSelect.value, sync_background: true});
+  }
+};
+els.workflowSelect.onchange = () => {
+  if (!updatingControls && els.workflowSelect.value) post('/api/workflow', {workflow: els.workflowSelect.value});
+};
+q('#joinMeeting').onclick = async () => {
+  try {
+    await post('/api/meeting/join', {meeting_url: els.meetingUrl.value, display_name: els.meetingName.value});
+  } catch (e) {
+    els.meetingStatus.textContent = 'error';
+    els.meetingDetail.textContent = e.message;
+  }
+};
 q('#leaveMeeting').onclick = () => post('/api/meeting/leave');
 q('#selectCharacter').onclick = () => post('/api/character/select', {character_path: els.characterSelect.value});
 document.querySelectorAll('[data-trigger]').forEach(b => b.onclick = () => post(`/api/trigger/${b.dataset.trigger}`));

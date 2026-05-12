@@ -27,6 +27,21 @@
         <audio id="speech" controls></audio>
       </div>
     </section>
+    <section class="controls identity-controls">
+      <label>Character
+        <select id="characterSelect"></select>
+      </label>
+      <label>Style
+        <select id="styleSelect"></select>
+      </label>
+      <label>Background
+        <select id="backgroundSelect"></select>
+      </label>
+      <label class="inline-check"><input id="syncBackground" type="checkbox" checked> Sync background to style</label>
+      <label>Workflow
+        <select id="workflowSelect"></select>
+      </label>
+    </section>
     <section class="controls">
       <button id="speak">Speak test line</button>
       <button id="toggle">Toggle mirror/reflect</button>
@@ -69,6 +84,9 @@
         <dt>Renderer</dt><dd id="rendererStatus">-</dd>
         <dt>Active emote</dt><dd id="emote">-</dd>
         <dt>Policy</dt><dd id="policy">-</dd>
+        <dt>Character</dt><dd id="character">-</dd>
+        <dt>Style</dt><dd id="style">-</dd>
+        <dt>Background</dt><dd id="background">-</dd>
       </dl>
       <h3>Hermes response</h3><pre id="response"></pre>
       <h3>Raw state</h3><pre id="raw"></pre>

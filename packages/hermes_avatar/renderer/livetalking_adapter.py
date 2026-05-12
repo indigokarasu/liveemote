@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .base import Renderer
+from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
 from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import CharacterIndex
 
@@ -51,6 +53,8 @@ class LiveTalkingAdapter(Renderer):
             "endpoint_status": self.endpoint_status,
             "last_latency_ms": self.last_latency_ms,
         }
+        self.active_style: VisualStyle | None = None
+        self.active_background: BackgroundSpec | None = None
 
     def load_character(self, character_index: CharacterIndex) -> None:
         self.character_index = character_index
@@ -58,6 +62,20 @@ class LiveTalkingAdapter(Renderer):
 
     def set_idle_emote(self, emote_id: str) -> None:
         self._request("emote", {"emote_id": emote_id}, optional=True)
+
+    def set_theme(self, character_index: CharacterIndex, style: VisualStyle | None, background: BackgroundSpec | None) -> None:
+        self.character_index = character_index
+        self.active_style = style
+        self.active_background = background
+        self._post(
+            "/avatar/theme",
+            {
+                "character_id": character_index.character_id,
+                "style": asdict(style) if style else None,
+                "background": asdict(background) if background else None,
+            },
+            optional=True,
+        )
 
     def set_behavior(self, behavior: AvatarBehaviorState) -> None:
         self.last_behavior = behavior

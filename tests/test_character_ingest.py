@@ -14,3 +14,12 @@ def test_default_character_index_builds():
     assert index.training_references[0].path.endswith("canonical.png")
     assert any(ref.state == "listening" for ref in index.expression_references())
     assert index.expression_references("listening")[0].id == "listening_expression_001"
+
+
+def test_character_styles_backgrounds_and_workflow_rules_load():
+    index = build_asset_index("character_input")
+    assert index.default_style_id == "neutral"
+    assert index.find_style("cyberpunk").default_background_id == "cyberpunk-city"
+    assert index.find_style("cozy").voice.warmth > index.find_style("glitch").voice.warmth
+    assert index.find_background("glitch-grid").synced_style_id == "glitch"
+    assert any(rule.workflow == "debugging" and rule.style_id == "glitch" for rule in index.workflow_style_rules)
