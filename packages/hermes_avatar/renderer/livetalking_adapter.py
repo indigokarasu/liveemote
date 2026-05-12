@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,18 @@ class LiveTalkingAdapter(Renderer):
         self.character_index: CharacterIndex | None = None
         self.process: subprocess.Popen | None = None
         self.last_behavior: AvatarBehaviorState | None = None
+        self.endpoint_status: dict[str, dict[str, Any]] = {}
+        self.last_latency_ms: int | None = None
+
+    def capabilities(self) -> dict:
+        online = self._request("health", {}, optional=True).get("ok", False)
+        return {
+            "base_url": self.base_url,
+            "vendor_dir_exists": self.vendor_dir.exists(),
+            "online": online,
+            "endpoint_status": self.endpoint_status,
+            "last_latency_ms": self.last_latency_ms,
+        }
         self.active_style: VisualStyle | None = None
         self.active_background: BackgroundSpec | None = None
         self.endpoint_status: dict[str, dict[str, Any]] = {}

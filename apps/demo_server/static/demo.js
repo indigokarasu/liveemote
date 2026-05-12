@@ -35,11 +35,7 @@ let audioContext, analyser, audioData, faceDetector;
 function q(s) { return document.querySelector(s); }
 
 async function post(url, body = {}) {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify(body),
-  });
+  const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
   const payload = await r.json();
   if (!r.ok) throw new Error(payload.detail || `Request failed: ${r.status}`);
   return update(payload);
@@ -117,10 +113,25 @@ function update(s) {
   els.meetingDetail.textContent = m.detail || '';
   els.raw.textContent = JSON.stringify(s, null, 2);
   els.avatar.className = a.mode || '';
+  updateCharacters(s.characters || [], s.character_id);
+  if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
   applyAvatarTheme(style, background);
   updateControls(s);
   if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
   return s;
+}
+
+function fmt(v) { return Number(v || 0).toFixed(2); }
+
+function updateCharacters(characters, activeId) {
+  const selected = els.characterSelect.value;
+  els.characterSelect.innerHTML = '';
+  characters.forEach(ch => {
+    const o = document.createElement('option');
+    o.value = ch.path; o.textContent = `${ch.character_id}${ch.character_id === activeId ? ' (active)' : ''} — ${ch.emote_count} emotes`;
+    els.characterSelect.appendChild(o);
+  });
+  if ([...els.characterSelect.options].some(o => o.value === selected)) els.characterSelect.value = selected;
 }
 
 async function poll() {
@@ -159,6 +170,7 @@ q('#joinMeeting').onclick = async () => {
   }
 };
 q('#leaveMeeting').onclick = () => post('/api/meeting/leave');
+q('#selectCharacter').onclick = () => post('/api/character/select', {character_path: els.characterSelect.value});
 document.querySelectorAll('[data-trigger]').forEach(b => b.onclick = () => post(`/api/trigger/${b.dataset.trigger}`));
 
 function audioVad() {

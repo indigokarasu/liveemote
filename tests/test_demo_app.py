@@ -16,6 +16,18 @@ def test_demo_status_endpoint():
     assert response.json()["character_id"] == "indigo"
 
 
+def test_demo_status_exposes_capabilities_and_characters():
+    client = TestClient(create_app(Args()))
+    payload = client.get("/api/status").json()
+    assert payload["capabilities"]["multi_character_switching"] is True
+    assert payload["capabilities"]["mobile_layout"] is True
+    assert payload["characters"]
+
+
+def test_audio_route_rejects_paths_outside_voice_cache():
+    client = TestClient(create_app(Args()))
+    response = client.get("/api/audio", params={"path": "/tmp/not-cache.wav"})
+    assert response.status_code in {403, 404}
 def test_demo_can_switch_style_background_and_workflow():
     client = TestClient(create_app(Args()))
     style_response = client.post("/api/style", json={"style_id": "cyberpunk", "sync_background": True})
