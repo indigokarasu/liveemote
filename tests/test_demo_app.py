@@ -110,3 +110,35 @@ def test_deeplivecam_renderer_uses_canonical_face_source():
     assert renderer["source_reference_role"] == "identity_anchor"
     assert renderer["source_image_path"].endswith("canonical/canonical.png")
     assert renderer["error"] is None
+
+
+def test_discover_character_catalog_builds_each_index_once(tmp_path, monkeypatch):
+    from hermes_avatar.character.asset_index import CharacterIndex
+    from hermes_avatar.demo import demo_orchestrator
+
+    for character_id in ("alpha", "beta"):
+        canonical = tmp_path / character_id / "canonical"
+        canonical.mkdir(parents=True)
+
+    calls = []
+
+    def fake_build_asset_index(path):
+        calls.append(path.name)
+        return CharacterIndex(character_id=path.name, canonical_image=str(path / "canonical" / "canonical.png"))
+
+    monkeypatch.setattr(demo_orchestrator, "build_asset_index", fake_build_asset_index)
+
+    roots, catalog = demo_orchestrator.discover_character_catalog(tmp_path)
+
+    assert calls == ["alpha", "beta"]
+    assert list(roots) == ["alpha", "beta"]
+    assert list(catalog) == ["alpha", "beta"]
+
+
+def test_audio_route_authorizes_outside_wav_before_existence_check(tmp_path):
+    client = TestClient(create_app(Args()))
+    outside_wav = tmp_path / "outside.wav"
+
+    response = client.get("/api/audio", params={"path": str(outside_wav)})
+
+    assert response.status_code == 403

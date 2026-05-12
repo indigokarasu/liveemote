@@ -44,10 +44,12 @@ def build_router(static_dir: str) -> APIRouter:
     def audio(path: str, request: Request):
         audio_path = Path(path).resolve()
         roots = request.app.state.orchestrator.safe_audio_roots()
-        if not audio_path.exists() or audio_path.suffix.lower() != ".wav":
+        if audio_path.suffix.lower() != ".wav":
             raise HTTPException(status_code=404, detail="Audio not found")
         if not any(audio_path.is_relative_to(root) for root in roots):
             raise HTTPException(status_code=403, detail="Audio path is outside the voice cache")
+        if not audio_path.exists():
+            raise HTTPException(status_code=404, detail="Audio not found")
         return FileResponse(str(audio_path), media_type="audio/wav")
     @router.get("/api/status")
     def status(request: Request):

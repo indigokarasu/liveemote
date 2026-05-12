@@ -66,6 +66,28 @@ Supported emote media: `.png`, `.jpg`, `.webp`, `.mp4`, `.mov`, `.webm`. Optiona
 
 The ingest path builds a `CharacterIndex` containing the canonical image, optional voice reference, optional ElevenLabs voice id, discovered emotes with deterministic ids such as `listening_001`, and a `training_references` manifest for renderer/model backends. The canonical image is always included as an `identity_anchor`; every static emote image (`.png`, `.jpg`, `.jpeg`, `.webp`) is also included as an `expression_reference` with its emote state and tags. Videos remain playable emotes but are not added as training references because most identity-consistency training or image-reference pipelines expect still frames.
 
+For emotes that do not fit the `emotes/<state>/` folder layout, declare them in `canonical/profile.yaml` under `emotes`. Profile emote paths may point anywhere relative to the character root, including sibling asset directories, and can carry explicit ids, tags, priority, intensity, duration, and variant names. A profile item can also declare a `variants` list for multiple clips or stills that share one behavior state:
+
+```yaml
+emotes:
+  - state: greeting
+    variants:
+      - name: wave
+        path: extras/wave.png
+        priority: 5
+        tags: [intro]
+      - name: nod
+        path: extras/nod.mp4
+        duration_ms: 1200
+  - id: wink_custom
+    state: wink
+    variant: playful
+    path: ../shared-emotes/wink.webp
+    tags: [playful]
+```
+
+When multiple variants exist for a state, `CharacterIndex.emotes_for(state)` returns all matching variants sorted by highest priority and deterministic id, while `find_emote(state)` returns the default/highest-priority variant for existing runtime callers.
+
 ### Using ~30 emote images for a consistent character
 
 Place the images under state folders in `character_input/emotes/<state>/` and keep `character_input/canonical/canonical.png` as the clean neutral identity anchor. For example, put multiple happy images in `emotes/happy/`, sad images in `emotes/sad/`, and attentive/listening images in `emotes/listening/`. When `build_asset_index()` runs, all supported static images are included in `CharacterIndex.training_references`, so a renderer can train or condition on the same character across expression states while still using deterministic emote ids for playback.

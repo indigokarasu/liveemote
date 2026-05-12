@@ -6,7 +6,7 @@ import time
 
 from hermes_avatar.affect.policy import AffectRuntime
 from hermes_avatar.affect.state import AvatarBehaviorState
-from hermes_avatar.character.asset_index import BackgroundSpec, VisualStyle
+from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.config.schema import AppConfig, load_config
 from hermes_avatar.demo.meeting_join import MeetingJoinService
@@ -20,19 +20,30 @@ from hermes_avatar.voice.moss_adapter import MossTTSAdapter
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
 
 
-def discover_character_roots(character: str | Path) -> dict[str, Path]:
+def discover_character_catalog(
+    character: str | Path,
+) -> tuple[dict[str, Path], dict[str, CharacterIndex]]:
     root = Path(character)
     roots: list[Path]
     if (root / "canonical").is_dir():
         roots = [root]
+    elif root.exists():
+        roots = sorted(path for path in root.iterdir() if (path / "canonical").is_dir())
     else:
-        roots = sorted(path for path in root.iterdir() if (path / "canonical").is_dir()) if root.exists() else []
+        roots = []
 
-    catalog: dict[str, Path] = {}
+    character_roots: dict[str, Path] = {}
+    character_catalog: dict[str, CharacterIndex] = {}
     for candidate in roots:
         index = build_asset_index(candidate)
-        catalog[index.character_id] = candidate
-    return catalog
+        character_roots[index.character_id] = candidate
+        character_catalog[index.character_id] = index
+    return character_roots, character_catalog
+
+
+def discover_character_roots(character: str | Path) -> dict[str, Path]:
+    character_roots, _ = discover_character_catalog(character)
+    return character_roots
 
 
 class DemoOrchestrator:
@@ -47,10 +58,11 @@ class DemoOrchestrator:
         agent_harness: str = "generic",
     ) -> None:
         self.config = config or load_config()
-        self.character_roots = discover_character_roots(character)
+        self.character_roots, self.character_catalog = discover_character_catalog(character)
         if not self.character_roots:
-            self.character_roots = {build_asset_index(character).character_id: Path(character)}
-        self.character_catalog = {cid: build_asset_index(path) for cid, path in self.character_roots.items()}
+            index = build_asset_index(character)
+            self.character_roots = {index.character_id: Path(character)}
+            self.character_catalog = {index.character_id: index}
         self.index = next(iter(self.character_catalog.values()))
         self.active_style_id = self.index.default_style_id
         self.active_background_id = self.index.default_background_id
@@ -65,9 +77,6 @@ class DemoOrchestrator:
         self.voice = self._voice_backend(voice_backend)
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
-
-    def _new_runtime(self) -> AffectRuntime:
-        return AffectRuntime(self.config, emote_lookup=lambda state: (self.index.find_emote(state).id if self.index.find_emote(state) else None))
 
     def _voice_backend(self, backend: str):
         normalized = (backend or "none").lower().replace("_", "-")
