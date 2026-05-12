@@ -150,6 +150,29 @@ python -m apps.demo_server.main --character ./character_input --voice-backend mo
 
 The adapter currently raises a clear `NotImplementedError` until the optional streaming model dependencies are installed and integrated.
 
+
+### Deep-Live-Cam models
+
+`make setup` clones Deep-Live-Cam and downloads the recommended upstream model files into `vendor/Deep-Live-Cam/models` before first run:
+
+```bash
+make setup
+```
+
+To manage the models separately, run:
+
+```bash
+make deeplivecam-models
+```
+
+To verify an existing checkout without downloading anything, run:
+
+```bash
+make check-deeplivecam-models
+```
+
+The setup helper downloads `inswapper_128_fp16.onnx` and `GFPGANv1.4.onnx` from `https://huggingface.co/hacksider/deep-live-cam/tree/main`. If your checked-out Deep-Live-Cam runtime expects the older `inswapper_128.onnx` or `GFPGANv1.4.pth` filenames, run `python scripts/setup_deeplivecam_models.py --include-legacy`. The `vendor/` payload remains ignored so large model files are not committed.
+
 ## Connecting an agent harness or running without an LLM
 
 The avatar body runtime is not tied to a specific agent. Use `agent.mode: external` with a generic harness name, or use convenience modes/names such as `openclaw`, `hermes`, or `deerflow`. Configure the URL in `packages/hermes_avatar/config/defaults.yaml` or your own config:

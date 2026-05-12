@@ -12,6 +12,7 @@ setup:
 	@test -d vendor/Deep-Live-Cam || git clone --depth 1 https://github.com/hacksider/Deep-Live-Cam.git vendor/Deep-Live-Cam
 	@test -d vendor/LuxTTS || git clone --depth 1 https://github.com/ysharma3501/LuxTTS.git vendor/LuxTTS
 	@test -d vendor/MOSS-TTS || git clone --depth 1 https://github.com/OpenMOSS/MOSS-TTS.git vendor/MOSS-TTS
+	$(PYTHON) scripts/setup_deeplivecam_models.py
 
 demo:
 	$(PYTHON) -m apps.demo_server.main --character $(CHARACTER) --renderer $(RENDERER) --voice-backend $(VOICE_BACKEND) --transport $(TRANSPORT)
@@ -21,6 +22,14 @@ demo-fake-hermes:
 
 demo-virtualcam:
 	$(PYTHON) -m apps.demo_server.main --character $(CHARACTER) --renderer $(RENDERER) --voice-backend $(VOICE_BACKEND) --transport virtualcam
+
+deeplivecam-models:
+	mkdir -p vendor
+	@test -d vendor/Deep-Live-Cam || git clone --depth 1 https://github.com/hacksider/Deep-Live-Cam.git vendor/Deep-Live-Cam
+	$(PYTHON) scripts/setup_deeplivecam_models.py
+
+check-deeplivecam-models:
+	$(PYTHON) scripts/setup_deeplivecam_models.py --check-only
 
 test:
 	$(PYTHON) scripts/create_sample_character.py --character ./character_input
