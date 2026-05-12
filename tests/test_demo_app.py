@@ -44,3 +44,46 @@ def test_demo_can_switch_style_background_and_workflow():
     assert workflow_response.status_code == 200
     assert workflow_response.json()["active_style_id"] == "glitch"
     assert workflow_response.json()["active_background_id"] == "glitch-grid"
+
+class OfflineArgs:
+    character = "./character_input"
+    renderer = "livetalking"
+    voice_backend = "none"
+    transport = "webrtc"
+    agent_mode = "offline"
+    agent_url = None
+    agent_harness = "none"
+
+
+def test_demo_runs_without_agent_or_voice_and_still_mirrors():
+    client = TestClient(create_app(OfflineArgs()))
+    status = client.get("/api/status").json()
+    assert status["capabilities"]["agent"]["available"] is False
+    assert status["capabilities"]["voice"]["backend"] == "none"
+
+    event_response = client.post(
+        "/api/event",
+        json={
+            "event": {
+                "type": "perception.frame",
+                "timestamp_ms": 1000,
+                "face_detected": True,
+                "face_center": [0.5, 0.5],
+                "expression": {"smile": 0.8},
+                "emotion_confidence": 0.9,
+            }
+        },
+    )
+    assert event_response.status_code == 200
+    payload = event_response.json()
+    assert payload["user"]["face_detected"] is True
+    assert payload["avatar"]["gaze_target"] == "toward_user"
+
+
+def test_offline_speak_test_does_not_synthesize_speech():
+    client = TestClient(create_app(OfflineArgs()))
+    response = client.post("/api/speak", json={"text": "hello"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["speech"] is None
+    assert payload["agent_response_text"] == ""

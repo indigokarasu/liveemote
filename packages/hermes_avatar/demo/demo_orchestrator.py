@@ -10,13 +10,14 @@ from hermes_avatar.character.asset_index import BackgroundSpec, VisualStyle
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.config.schema import AppConfig, load_config
 from hermes_avatar.demo.meeting_join import MeetingJoinService
-from hermes_avatar.protocol.hermes_bridge import HermesBridge
+from hermes_avatar.protocol.agent_bridge import AgentBridge
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
 from hermes_avatar.voice.base import VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
 from hermes_avatar.voice.moss_adapter import MossTTSAdapter
+from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
 
 
 def discover_character_roots(character: str | Path) -> dict[str, Path]:
@@ -35,7 +36,16 @@ def discover_character_roots(character: str | Path) -> dict[str, Path]:
 
 
 class DemoOrchestrator:
-    def __init__(self, character: str, renderer: str = "livetalking", voice_backend: str = "luxtts", hermes_mode: str = "fake", config: AppConfig | None = None) -> None:
+    def __init__(
+        self,
+        character: str,
+        renderer: str = "livetalking",
+        voice_backend: str = "luxtts",
+        agent_mode: str = "fake",
+        config: AppConfig | None = None,
+        agent_url: str | None = None,
+        agent_harness: str = "generic",
+    ) -> None:
         self.config = config or load_config()
         self.character_roots = discover_character_roots(character)
         if not self.character_roots:
@@ -55,10 +65,16 @@ class DemoOrchestrator:
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
 
+    def _new_runtime(self) -> AffectRuntime:
+        return AffectRuntime(self.config, emote_lookup=lambda state: (self.index.find_emote(state).id if self.index.find_emote(state) else None))
+
     def _voice_backend(self, backend: str):
-        if backend == "elevenlabs":
+        normalized = (backend or "none").lower().replace("_", "-")
+        if normalized in {"none", "off", "disabled", "silent", "no-tts"}:
+            return NoopVoiceAdapter()
+        if normalized == "elevenlabs":
             return ElevenLabsAdapter(cache_dir=self.config.voice.cache_dir)
-        if backend == "moss":
+        if normalized == "moss":
             return MossTTSAdapter()
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
@@ -99,6 +115,7 @@ class DemoOrchestrator:
             "conversation": self.runtime.conversation.to_dict(),
             "avatar": self.runtime.avatar.to_dict(),
             "mode_policy": self.runtime.mode,
+            "agent_response_text": self.last_response_text,
             "hermes_response_text": self.last_response_text,
             "character_id": self.index.character_id,
             "character_name": self.index.display_name or self.index.character_id,
@@ -144,9 +161,15 @@ class DemoOrchestrator:
 
     async def speak_test(self, text: str) -> dict:
         self.runtime.conversation.turn_state = "assistant_thinking"
-        response = await self.hermes.generate_response(text, self.runtime.user)
+        response = await self.agent.generate_response(text, self.runtime.user)
         self.last_response_text = response.text
         self.runtime.hermes_tags = response.tags
+        if not response.text:
+            behavior = self.runtime.tick(int(time.time() * 1000))
+            self.renderer.set_behavior(behavior)
+            self.runtime.conversation.turn_state = "idle"
+            return {**self.status(), "speech": None, "agent_response": asdict(response)}
+
         self.runtime.conversation.turn_state = "assistant_speaking"
         behavior = self.runtime.tick(int(time.time() * 1000))
         response_voice = response.tags.get("voice", {}) if isinstance(response.tags.get("voice", {}), dict) else {}

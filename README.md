@@ -1,6 +1,6 @@
 # Hermes Live Character Avatar Demo
 
-Hermes Live Avatar is a local demo system that turns a canonical virtual character folder into a video-call-style embodied assistant. Hermes remains the cognition layer; this repository provides the body runtime: character ingest, affect policies, perception event wrappers, voice backends, renderer adapters, and a browser debug UI.
+Hermes Live Avatar is a local demo system that turns a canonical virtual character folder into a video-call-style embodied assistant. The cognition layer is optional and harness-agnostic: connect Hermes, OpenClaw, Deerflow, or any HTTP/WebSocket agent that can exchange compact transcript and affect JSON, or run with no LLM at all. This repository provides the body runtime: character ingest, affect policies, perception event wrappers, voice backends, renderer adapters, and a browser debug UI.
 
 ## Architecture
 
@@ -8,8 +8,8 @@ Hermes Live Avatar is a local demo system that turns a canonical virtual charact
 User mic + webcam
   -> browser/local perception events (audio VAD, face box, gaze confidence, expression classification)
   -> hermes-affect-runtime (rolling state, mirror/reflect policy, smoothing)
-  -> Hermes bridge (fake or external compact summaries)
-  -> voice backend (LuxTTS vendor command or local parametric WAV, ElevenLabs, experimental MOSS-TTS)
+  -> agent bridge (offline, fake, or external compact summaries for Hermes/OpenClaw/Deerflow/etc.)
+  -> optional voice backend (disabled, LuxTTS vendor command or local parametric WAV, ElevenLabs, experimental MOSS-TTS)
   -> LiveTalking adapter (lip-sync/WebRTC/virtualcam handoff)
   -> browser demo / virtual camera
 ```
@@ -150,25 +150,34 @@ python -m apps.demo_server.main --character ./character_input --voice-backend mo
 
 The adapter currently raises a clear `NotImplementedError` until the optional streaming model dependencies are installed and integrated.
 
-## Connecting real Hermes
+## Connecting an agent harness or running without an LLM
 
-Use external mode and configure the URL in `packages/hermes_avatar/config/defaults.yaml` or your own config:
+The avatar body runtime is not tied to a specific agent. Use `agent.mode: external` with a generic harness name, or use convenience modes/names such as `openclaw`, `hermes`, or `deerflow`. Configure the URL in `packages/hermes_avatar/config/defaults.yaml` or your own config:
 
 ```yaml
-hermes:
+agent:
   mode: external
+  harness: openclaw   # or hermes, deerflow, generic, etc.
   url: ws://127.0.0.1:18789/avatar
   send_events: [user.transcript, affect.summary, interruption]
-  receive_events: [hermes.response, hermes.behavior_hint]
+  receive_events: [agent.response, agent.behavior_hint]
 ```
 
 Launch with:
 
 ```bash
-python -m apps.demo_server.main --character ./character_input --hermes-mode external
+python -m apps.demo_server.main --character ./character_input --agent-mode external --agent-harness openclaw --agent-url ws://127.0.0.1:18789/avatar
 ```
 
-The bridge sends compact transcripts and affect summaries. It does **not** send raw video frames to Hermes by default.
+The bridge sends compact transcripts and affect summaries. It does **not** send raw video frames to the agent by default. External agents may return `text` plus optional `tags`, but the bridge also accepts common response shapes such as `content`, `response`, `message.content`, `output.text`, `tags`, `affect_tags`, or scalar `emotion`.
+
+For a pure body-runtime demo with no LLM and no TTS installed, disable both the agent and voice backend:
+
+```bash
+python -m apps.demo_server.main --character ./character_input --agent-mode offline --voice-backend none
+```
+
+In this mode the avatar cannot produce spoken replies or mine conversation text for emotion/sentiment tags, but camera/audio perception events, manual controls, gaze, affect smoothing, and mirror/reflect behavior continue to run locally.
 
 ## Affect runtime behavior
 
@@ -176,7 +185,7 @@ The deterministic baseline runtime runs independently of the LLM and consumes JS
 
 - `perception.frame`
 - `audio.vad`
-- `hermes.response`
+- `agent.response` / `hermes.response`
 
 It maintains rolling user/conversation/avatar state, smooths continuous values with exponential moving averages, latches expression changes with dwell time, clamps gaze/head movement, and supports `mirror` and `reflect` policy modes. Assistant speaking enables lip-sync and prevents camera mirroring from overriding the mouth.
 

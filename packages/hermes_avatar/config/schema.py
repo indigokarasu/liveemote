@@ -35,10 +35,15 @@ class BehaviorConfig(BaseModel):
     expressiveness: float = 0.42
     avoid_constant_eye_contact: bool = True
 
-class HermesConfig(BaseModel):
+class AgentConfig(BaseModel):
     mode: str = "fake"
+    harness: str = "generic"
     url: str = "ws://127.0.0.1:18789/avatar"
     send_events: list[str] = Field(default_factory=lambda: ["user.transcript", "affect.summary", "interruption"])
+    receive_events: list[str] = Field(default_factory=lambda: ["agent.response", "agent.behavior_hint"])
+
+
+class HermesConfig(AgentConfig):
     receive_events: list[str] = Field(default_factory=lambda: ["hermes.response", "hermes.behavior_hint"])
 
 class RendererConfig(BaseModel):
@@ -53,6 +58,7 @@ class AppConfig(BaseModel):
     affect: AffectConfig = Field(default_factory=AffectConfig)
     gaze: GazeConfig = Field(default_factory=GazeConfig)
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     hermes: HermesConfig = Field(default_factory=HermesConfig)
     renderer: RendererConfig = Field(default_factory=RendererConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)

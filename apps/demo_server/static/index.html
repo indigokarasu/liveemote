@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Hermes Live Avatar</title>
+  <title>LiveEmote Avatar</title>
   <link rel="stylesheet" href="/static/demo.css">
 </head>
 <body>
   <header>
-    <h1>Hermes Live Character Avatar</h1>
-    <p>Local affect runtime + voice bridge + LiveTalking adapter demo with capability checks, browser perception, visual styles, and character controls.</p>
+    <h1>LiveEmote Character Avatar</h1>
+    <p>Local affect runtime + optional agent/voice bridge + LiveTalking adapter demo with capability checks, browser perception, visual styles, and character controls.</p>
   </header>
   <main>
     <section class="stage">
@@ -53,14 +53,14 @@
     <section class="panel character-controls">
       <h2>Scene characters</h2>
       <p class="note">Switch between discovered local character folders without restarting the server.</p>
-      <div class="character-row"><select id="characterSelect"></select><button id="selectCharacter">Load character</button></div>
+      <div class="character-row"><select id="characterPathSelect"></select><button id="selectCharacter">Load character</button></div>
     </section>
     <section class="panel meeting-test">
       <h2>Google Meet WebRTC test mode</h2>
       <p class="note">Paste a Google Meet URL to route the avatar through the WebRTC meeting path and see join latency.</p>
       <div class="meeting-row">
         <input id="meetingUrl" type="url" inputmode="url" placeholder="https://meet.google.com/abc-defg-hij">
-        <input id="meetingName" type="text" placeholder="Hermes Avatar" value="Hermes Avatar">
+        <input id="meetingName" type="text" placeholder="LiveEmote Avatar" value="LiveEmote Avatar">
         <button id="joinMeeting">Join Meet</button>
         <button id="leaveMeeting" class="secondary">Leave</button>
       </div>
@@ -88,7 +88,7 @@
         <dt>Style</dt><dd id="style">-</dd>
         <dt>Background</dt><dd id="background">-</dd>
       </dl>
-      <h3>Hermes response</h3><pre id="response"></pre>
+      <h3>Agent response</h3><pre id="response"></pre>
       <h3>Raw state</h3><pre id="raw"></pre>
     </section>
   </main>

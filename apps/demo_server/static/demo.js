@@ -18,6 +18,7 @@ const els = {
   avatar: q('#avatarCanvas'),
   speech: q('#speech'),
   characterSelect: q('#characterSelect'),
+  characterPathSelect: q('#characterPathSelect'),
   styleSelect: q('#styleSelect'),
   backgroundSelect: q('#backgroundSelect'),
   syncBackground: q('#syncBackground'),
@@ -90,10 +91,6 @@ function update(s) {
   const background = s.active_background || null;
   els.mode.textContent = a.mode || '-';
   els.affect.textContent = a.affect || '-';
-  const style = s.active_style || null;
-  const background = s.active_background || null;
-  els.mode.textContent = a.mode;
-  els.affect.textContent = a.affect;
   els.vad.textContent = u.speaking ? 'speaking' : 'silent';
   els.face.textContent = String(Boolean(u.face_detected));
   els.gaze.textContent = a.gaze_target || '-';
@@ -103,35 +100,33 @@ function update(s) {
   els.rendererStatus.textContent = c.renderer?.online ? `online (${c.renderer.last_latency_ms ?? 0} ms)` : 'offline / contract checked';
   els.emote.textContent = a.emote_id || '-';
   els.policy.textContent = s.mode_policy || '-';
-  els.policy.textContent = s.mode_policy;
   els.character.textContent = s.character_name || s.character_id || '-';
   els.style.textContent = style ? `${style.name} (${style.id})` : '-';
   els.background.textContent = background ? `${background.name} (${background.id})` : '-';
-  els.response.textContent = s.hermes_response_text || '';
+  els.response.textContent = s.agent_response_text || s.hermes_response_text || '';
   els.meetingStatus.textContent = m.status || 'idle';
   els.meetingLatency.textContent = m.estimated_join_latency_ms == null ? '-' : `${m.estimated_join_latency_ms} ms`;
   els.meetingDetail.textContent = m.detail || '';
   els.raw.textContent = JSON.stringify(s, null, 2);
   els.avatar.className = a.mode || '';
-  updateCharacters(s.characters || [], s.character_id);
-  if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
+  updateCharacterPaths(s.characters || [], s.character_id);
   applyAvatarTheme(style, background);
   updateControls(s);
   if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
   return s;
 }
-
 function fmt(v) { return Number(v || 0).toFixed(2); }
 
-function updateCharacters(characters, activeId) {
-  const selected = els.characterSelect.value;
-  els.characterSelect.innerHTML = '';
+function updateCharacterPaths(characters, activeId) {
+  const selected = els.characterPathSelect.value;
+  els.characterPathSelect.innerHTML = '';
   characters.forEach(ch => {
     const o = document.createElement('option');
-    o.value = ch.path; o.textContent = `${ch.character_id}${ch.character_id === activeId ? ' (active)' : ''} — ${ch.emote_count} emotes`;
-    els.characterSelect.appendChild(o);
+    o.value = ch.path;
+    o.textContent = `${ch.name || ch.id}${ch.id === activeId ? ' (active)' : ''} — ${ch.emote_count} emotes`;
+    els.characterPathSelect.appendChild(o);
   });
-  if ([...els.characterSelect.options].some(o => o.value === selected)) els.characterSelect.value = selected;
+  if ([...els.characterPathSelect.options].some(o => o.value === selected)) els.characterPathSelect.value = selected;
 }
 
 async function poll() {
@@ -170,7 +165,7 @@ q('#joinMeeting').onclick = async () => {
   }
 };
 q('#leaveMeeting').onclick = () => post('/api/meeting/leave');
-q('#selectCharacter').onclick = () => post('/api/character/select', {character_path: els.characterSelect.value});
+q('#selectCharacter').onclick = () => post('/api/character/select', {character_path: els.characterPathSelect.value});
 document.querySelectorAll('[data-trigger]').forEach(b => b.onclick = () => post(`/api/trigger/${b.dataset.trigger}`));
 
 function audioVad() {
