@@ -6,10 +6,10 @@ Hermes Live Avatar is a local demo system that turns a canonical virtual charact
 
 ```text
 User mic + webcam
-  -> perception events (VAD, face position, gaze proxy, expression proxy)
+  -> browser/local perception events (audio VAD, face box, gaze confidence, expression classification)
   -> hermes-affect-runtime (rolling state, mirror/reflect policy, smoothing)
   -> Hermes bridge (fake or external compact summaries)
-  -> voice backend (LuxTTS fallback, ElevenLabs, experimental MOSS-TTS)
+  -> voice backend (LuxTTS vendor command or local parametric WAV, ElevenLabs, experimental MOSS-TTS)
   -> LiveTalking adapter (lip-sync/WebRTC/virtualcam handoff)
   -> browser demo / virtual camera
 ```
@@ -18,7 +18,7 @@ User mic + webcam
 
 - Python 3.11+
 - Webcam and microphone for live perception
-- CPU works for the skeleton and fallback WAV generation
+- CPU works for the local parametric voice and browser demo
 - NVIDIA GPU, Apple MPS, or a fast CPU is recommended for real LuxTTS and LiveTalking inference
 - Virtual camera output requires platform-specific camera plumbing plus `pyvirtualcam`
 
@@ -84,7 +84,7 @@ Recommended dataset hygiene for consistency:
 make demo CHARACTER=./character_input
 ```
 
-Open <http://127.0.0.1:8080>. The page shows local webcam preview, avatar output placeholder, current behavior mode, VAD state, face detected state, gaze target, active emote, Hermes text, and manual controls.
+Open <http://127.0.0.1:8080>. The page shows local webcam preview, a full-body synthetic avatar preview, current behavior mode, audio VAD state, face detected state, gaze target/confidence, emotion confidence, active emote, renderer/voice capability status, Hermes text, multi-character controls, and manual controls.
 
 For a dependency-light demo path using fake Hermes:
 
@@ -117,7 +117,7 @@ Use the default backend:
 python -m apps.demo_server.main --character ./character_input --voice-backend luxtts
 ```
 
-Place a reference voice at `character_input/canonical/voice_reference.wav`. The adapter caches the reference prompt location and writes generated WAVs to `cache/voice`. In this skeleton, if LuxTTS is not wired at runtime, the adapter creates a deterministic placeholder WAV so the rest of the pipeline can be tested offline.
+Place a reference voice at `character_input/canonical/voice_reference.wav`. The adapter caches the reference prompt location and writes generated WAVs to `cache/voice`. For full LuxTTS wiring, set `LUXTTS_COMMAND` to a command template that writes a WAV to `{output}` and may use `{text}`, `{reference}`, `{device}`, and `{vendor_dir}`. When that command is absent, the adapter uses a deterministic local parametric voice with duration and synthesis latency reporting, so TTS timing is still measured in local demos.
 
 ### ElevenLabs voice
 
@@ -173,11 +173,15 @@ It maintains rolling user/conversation/avatar state, smooths continuous values w
 
 ## LiveTalking adapter
 
-`LiveTalkingAdapter` is intentionally non-invasive first. It can load a `CharacterIndex`, set behavior/emotes, send pre-generated WAV speech, interrupt speech, and request WebRTC or virtual camera startup through HTTP endpoints if a patched or compatible LiveTalking process is running. If LiveTalking is offline, calls degrade to no-op/offline responses so the browser, affect, and voice paths remain testable.
+`LiveTalkingAdapter` now has a contract-first HTTP surface. It tracks health plus character, emote, behavior, speak, interrupt, WebRTC, virtual camera, join-meeting, and leave-meeting endpoints. Unsupported or offline endpoints are reported in `/api/status` under `capabilities.renderer.endpoint_status` with latency and error details, so operators can see exactly which LiveTalking features are active.
 
 ## Deep-Live-Cam safety note
 
 Deep-Live-Cam is optional and off by default. Do not use a real person's face identity as output unless you have explicit permission. Clearly label shared synthetic/deepfake output; the adapter includes a synthetic-output watermark string for this reason.
+
+## Multi-character, mobile, and cloud deployment
+
+The browser UI discovers sibling character folders with `canonical/` assets and can switch the active character through `/api/character/select` without restarting the server. The CSS layout is responsive for narrow/mobile browser debugging. `Dockerfile` plus `deploy/k8s/demo.yaml` provide a container and Kubernetes Deployment/Service starter path for cloud-hosted demos. Generated audio is served only from the configured voice cache.
 
 ## Required commands
 
@@ -200,11 +204,10 @@ make push-check
 
 The check fails if cloned vendor payloads, nested `.git` metadata, binary files, or large generated files are accidentally tracked. It also warns when the local checkout has no remote configured, because that environment cannot push until a remote is added by the caller.
 
-## Limitations
+## Capability coverage
 
-- This is a v1 local demo skeleton, not a production avatar stack.
-- LuxTTS integration has an offline WAV fallback until full vendor API wiring is configured.
-- LiveTalking is controlled through a non-invasive HTTP adapter; endpoint support depends on the running LiveTalking app or future fork patch.
-- Browser perception telemetry is intentionally lightweight and approximate.
-- Emotion recognition, eye tracking, TTS latency, and full-body animation are not production-grade.
-- No cloud deployment, mobile support, or multi-character scene support is included.
+- Local voice output is always available through either `LUXTTS_COMMAND` vendor wiring or the deterministic local parametric WAV generator, and every synthesis response reports duration plus latency.
+- LiveTalking integration exposes endpoint-by-endpoint capability and latency reporting instead of silent best-effort no-ops.
+- Browser perception uses local camera/audio APIs to send face-box, gaze-confidence, expression-confidence, and VAD telemetry without raw frame upload.
+- The affect state carries emotion confidence, gaze confidence, TTS latency, and full-body pose hints used by the browser avatar preview.
+- Responsive browser controls, runtime character switching, a Dockerfile, and a Kubernetes starter manifest are included for mobile debugging, multi-character demo workflows, and cloud demo deployment.

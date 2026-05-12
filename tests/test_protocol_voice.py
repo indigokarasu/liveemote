@@ -15,3 +15,12 @@ def test_luxtts_fallback_writes_wav(tmp_path):
     speech = adapter.synthesize("hello avatar", VoiceStyle())
     assert Path(speech.audio_path).exists()
     assert speech.backend == "luxtts"
+
+
+def test_luxtts_reports_latency_and_engine(tmp_path):
+    adapter = LuxTTSAdapter(cache_dir=tmp_path)
+    speech = adapter.synthesize("timed local speech", VoiceStyle(intensity=0.5))
+    assert speech.duration_ms is not None and speech.duration_ms > 0
+    assert speech.latency_ms is not None and speech.latency_ms >= 0
+    assert speech.engine == "local-parametric"
+    assert adapter.capability_status()["last_engine"] == "local-parametric"
