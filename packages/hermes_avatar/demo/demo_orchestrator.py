@@ -56,7 +56,8 @@ class DemoOrchestrator:
         self.active_background_id = self.index.default_background_id
         self.sync_background_to_style = True
         self.runtime = self._new_runtime()
-        self.hermes = HermesBridge(hermes_mode, self.config.hermes.url)
+        self.agent = AgentBridge(agent_mode, agent_url or self.config.hermes.url, agent_harness)
+        self.hermes = self.agent  # Backward-compatible alias for older status/UI naming.
         self.renderer = DeepLiveCamAdapter() if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
         self.renderer.load_character(self.index)
         self._notify_renderer_theme()
@@ -146,9 +147,11 @@ class DemoOrchestrator:
     def capabilities(self) -> dict:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
         voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
+        agent_caps = self.agent.capability_status() if hasattr(self.agent, "capability_status") else {"backend": type(self.agent).__name__}
         return {
             "renderer": renderer_caps,
             "voice": voice_caps,
+            "agent": agent_caps,
             "mobile_layout": True,
             "multi_character_switching": True,
             "cloud_manifest_available": True,
