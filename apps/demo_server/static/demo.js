@@ -4,6 +4,10 @@ const els = {
   vad: q('#vad'),
   face: q('#face'),
   gaze: q('#gaze'),
+  confidence: q('#confidence'),
+  bodyPose: q('#bodyPose'),
+  voiceStatus: q('#voiceStatus'),
+  rendererStatus: q('#rendererStatus'),
   emote: q('#emote'),
   policy: q('#policy'),
   character: q('#character'),
@@ -12,6 +16,7 @@ const els = {
   response: q('#response'),
   raw: q('#raw'),
   avatar: q('#avatarCanvas'),
+  speech: q('#speech'),
   characterSelect: q('#characterSelect'),
   styleSelect: q('#styleSelect'),
   backgroundSelect: q('#backgroundSelect'),
@@ -25,6 +30,7 @@ const els = {
 };
 let policy = 'reflect';
 let updatingControls = false;
+let audioContext, analyser, audioData, faceDetector;
 
 function q(s) { return document.querySelector(s); }
 
@@ -73,10 +79,17 @@ function updateControls(s) {
   updatingControls = false;
 }
 
+function fmt(v) { return Number(v || 0).toFixed(2); }
+
 function update(s) {
   const a = s.avatar || {};
   const u = s.user || {};
   const m = s.meeting || {};
+  const c = s.capabilities || {};
+  const style = s.active_style || null;
+  const background = s.active_background || null;
+  els.mode.textContent = a.mode || '-';
+  els.affect.textContent = a.affect || '-';
   const style = s.active_style || null;
   const background = s.active_background || null;
   els.mode.textContent = a.mode;
@@ -89,6 +102,7 @@ function update(s) {
   els.voiceStatus.textContent = `${c.voice?.last_engine || c.voice?.backend || '-'} (${c.voice?.last_latency_ms ?? 0} ms)`;
   els.rendererStatus.textContent = c.renderer?.online ? `online (${c.renderer.last_latency_ms ?? 0} ms)` : 'offline / contract checked';
   els.emote.textContent = a.emote_id || '-';
+  els.policy.textContent = s.mode_policy || '-';
   els.policy.textContent = s.mode_policy;
   els.character.textContent = s.character_name || s.character_id || '-';
   els.style.textContent = style ? `${style.name} (${style.id})` : '-';
@@ -103,6 +117,7 @@ function update(s) {
   if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
   applyAvatarTheme(style, background);
   updateControls(s);
+  if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
   return s;
 }
 

@@ -9,22 +9,22 @@ from typing import Any
 import httpx
 
 from .base import Renderer
-from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
 from hermes_avatar.affect.state import AvatarBehaviorState
-from hermes_avatar.character.asset_index import CharacterIndex
+from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
 
 
 class LiveTalkingAdapter(Renderer):
     """HTTP adapter for LiveTalking-compatible avatar runtimes.
 
-    The adapter now exposes a contract-first status surface: every optional endpoint
-    is tracked, health is probed, and unsupported calls return structured capability
+    The adapter exposes a contract-first status surface: every optional endpoint is
+    tracked, health is probed, and unsupported calls return structured capability
     information instead of disappearing into silent no-ops.
     """
 
     ENDPOINTS = {
         "health": ("GET", "/health"),
         "character": ("POST", "/avatar/character"),
+        "theme": ("POST", "/avatar/theme"),
         "emote": ("POST", "/avatar/emote"),
         "behavior": ("POST", "/avatar/behavior"),
         "speak": ("POST", "/avatar/speak"),
@@ -55,6 +55,18 @@ class LiveTalkingAdapter(Renderer):
         }
         self.active_style: VisualStyle | None = None
         self.active_background: BackgroundSpec | None = None
+        self.endpoint_status: dict[str, dict[str, Any]] = {}
+        self.last_latency_ms: int | None = None
+
+    def capabilities(self) -> dict:
+        online = self._request("health", {}, optional=True).get("ok", False)
+        return {
+            "base_url": self.base_url,
+            "vendor_dir_exists": self.vendor_dir.exists(),
+            "online": online,
+            "endpoint_status": self.endpoint_status,
+            "last_latency_ms": self.last_latency_ms,
+        }
 
     def load_character(self, character_index: CharacterIndex) -> None:
         self.character_index = character_index
@@ -62,6 +74,20 @@ class LiveTalkingAdapter(Renderer):
 
     def set_idle_emote(self, emote_id: str) -> None:
         self._request("emote", {"emote_id": emote_id}, optional=True)
+
+    def set_theme(self, character_index: CharacterIndex, style: VisualStyle | None, background: BackgroundSpec | None) -> None:
+        self.character_index = character_index
+        self.active_style = style
+        self.active_background = background
+        self._request(
+            "theme",
+            {
+                "character_id": character_index.character_id,
+                "style": asdict(style) if style else None,
+                "background": asdict(background) if background else None,
+            },
+            optional=True,
+        )
 
     def set_theme(self, character_index: CharacterIndex, style: VisualStyle | None, background: BackgroundSpec | None) -> None:
         self.character_index = character_index
