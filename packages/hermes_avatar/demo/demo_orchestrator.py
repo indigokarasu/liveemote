@@ -1,11 +1,12 @@
 from __future__ import annotations
+
 from dataclasses import asdict
 from pathlib import Path
 import time
 
 from hermes_avatar.affect.policy import AffectRuntime
 from hermes_avatar.affect.state import AvatarBehaviorState
-from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
+from hermes_avatar.character.asset_index import BackgroundSpec, VisualStyle
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.config.schema import AppConfig, load_config
 from hermes_avatar.demo.meeting_join import MeetingJoinService
@@ -25,21 +26,7 @@ def discover_character_roots(character: str | Path) -> dict[str, Path]:
         roots = [root]
     else:
         roots = sorted(path for path in root.iterdir() if (path / "canonical").is_dir()) if root.exists() else []
-    catalog: dict[str, Path] = {}
-    for candidate in roots:
-        index = build_asset_index(candidate)
-        catalog[index.character_id] = candidate
-    return catalog
 
-
-
-def discover_character_roots(character: str | Path) -> dict[str, Path]:
-    root = Path(character)
-    roots: list[Path]
-    if (root / "canonical").is_dir():
-        roots = [root]
-    else:
-        roots = sorted(path for path in root.iterdir() if (path / "canonical").is_dir()) if root.exists() else []
     catalog: dict[str, Path] = {}
     for candidate in roots:
         index = build_asset_index(candidate)
@@ -58,8 +45,7 @@ class DemoOrchestrator:
         self.active_style_id = self.index.default_style_id
         self.active_background_id = self.index.default_background_id
         self.sync_background_to_style = True
-        lookup = lambda state: (self.index.find_emote(state).id if self.index.find_emote(state) else None)
-        self.runtime = AffectRuntime(self.config, emote_lookup=lookup)
+        self.runtime = self._new_runtime()
         self.hermes = HermesBridge(hermes_mode, self.config.hermes.url)
         self.renderer = DeepLiveCamAdapter() if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
         self.renderer.load_character(self.index)
@@ -76,6 +62,13 @@ class DemoOrchestrator:
             return MossTTSAdapter()
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
+    def _new_runtime(self) -> AffectRuntime:
+        def lookup(state: str) -> str | None:
+            emote = self.index.find_emote(state)
+            return emote.id if emote else None
+
+        return AffectRuntime(self.config, emote_lookup=lookup)
+
     def active_style(self) -> VisualStyle | None:
         return self.index.find_style(self.active_style_id)
 
@@ -87,16 +80,18 @@ class DemoOrchestrator:
         if callable(set_theme):
             set_theme(self.index, self.active_style(), self.active_background())
 
-    def _reset_runtime_for_character(self) -> None:
-        lookup = lambda state: (self.index.find_emote(state).id if self.index.find_emote(state) else None)
-        self.runtime = AffectRuntime(self.config, emote_lookup=lookup)
-        self.runtime.avatar = AvatarBehaviorState(
+    def _neutral_avatar_state(self) -> AvatarBehaviorState:
+        neutral_emote = self.index.find_emote("neutral")
+        return AvatarBehaviorState(
             mode="idle",
             affect="neutral",
             gaze_target="toward_user",
-            emote_id=(self.index.find_emote("neutral").id if self.index.find_emote("neutral") else None),
+            emote_id=neutral_emote.id if neutral_emote else None,
         )
-        self.runtime.avatar = AvatarBehaviorState(mode="idle", affect="neutral", gaze_target="toward_user", emote_id=(self.index.find_emote("neutral").id if self.index.find_emote("neutral") else None))
+
+    def _reset_runtime_for_character(self) -> None:
+        self.runtime = self._new_runtime()
+        self.runtime.avatar = self._neutral_avatar_state()
 
     def status(self) -> dict:
         return {
@@ -134,10 +129,13 @@ class DemoOrchestrator:
     def capabilities(self) -> dict:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
         voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
-        return {"renderer": renderer_caps, "voice": voice_caps, "mobile_layout": True, "multi_character_switching": True, "cloud_manifest_available": True}
-            {"id": index.character_id, "name": index.display_name or index.character_id, "path": str(self.character_roots[index.character_id])}
-            for index in self.character_catalog.values()
-        ]
+        return {
+            "renderer": renderer_caps,
+            "voice": voice_caps,
+            "mobile_layout": True,
+            "multi_character_switching": True,
+            "cloud_manifest_available": True,
+        }
 
     def apply_event(self, event: dict) -> dict:
         behavior = self.runtime.consume(event)
@@ -160,66 +158,14 @@ class DemoOrchestrator:
             VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}}),
             self.index.voice_reference,
         )
-        speech = self.voice.synthesize(response.text, VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}}), self.index.voice_reference)
         self.renderer.speak(speech.audio_path, response.text, behavior)
         self.runtime.conversation.turn_state = "idle"
-        self.runtime.avatar = AvatarBehaviorState(
-            mode="idle",
-            affect="neutral",
-            gaze_target="toward_user",
-            emote_id=(self.index.find_emote("neutral").id if self.index.find_emote("neutral") else None),
-        )
+        self.runtime.avatar = self._neutral_avatar_state()
         return {**self.status(), "speech": speech.__dict__}
 
     def set_policy_mode(self, mode: str) -> dict:
         self.runtime.set_mode(mode)
         self.runtime.tick(int(time.time() * 1000))
-        return self.status()
-
-    def set_character(self, character_id: str) -> dict:
-        if character_id not in self.character_roots:
-            raise ValueError(f"Unknown character: {character_id}")
-        self.index = self.character_catalog[character_id]
-        self.active_style_id = self.index.default_style_id
-        self.active_background_id = self.index.default_background_id
-        self.sync_background_to_style = True
-        self.renderer.load_character(self.index)
-        self._reset_runtime_for_character()
-        self._notify_renderer_theme()
-        return self.status()
-
-    def set_style(self, style_id: str, sync_background: bool = True) -> dict:
-        style = self.index.find_style(style_id)
-        if style is None:
-            raise ValueError(f"Unknown style for {self.index.character_id}: {style_id}")
-        self.active_style_id = style.id
-        self.sync_background_to_style = sync_background
-        if sync_background and style.default_background_id:
-            self.active_background_id = style.default_background_id
-        self._notify_renderer_theme()
-        return self.status()
-
-    def set_background(self, background_id: str, sync_background: bool = False) -> dict:
-        background = self.index.find_background(background_id)
-        if background is None:
-            raise ValueError(f"Unknown background for {self.index.character_id}: {background_id}")
-        self.active_background_id = background.id
-        self.sync_background_to_style = sync_background
-        self._notify_renderer_theme()
-        return self.status()
-
-    def apply_workflow(self, workflow: str) -> dict:
-        rule = next((rule for rule in self.index.workflow_style_rules if rule.workflow == workflow), None)
-        if rule is None:
-            raise ValueError(f"Unknown workflow for {self.index.character_id}: {workflow}")
-        self.active_style_id = rule.style_id
-        if rule.background_id:
-            self.active_background_id = rule.background_id
-        elif self.sync_background_to_style:
-            style = self.active_style()
-            if style and style.default_background_id:
-                self.active_background_id = style.default_background_id
-        self._notify_renderer_theme()
         return self.status()
 
     def set_character(self, character_id: str) -> dict:
