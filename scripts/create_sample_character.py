@@ -43,7 +43,94 @@ def create_sample_character(root: Path, overwrite: bool = False) -> None:
     canonical_dir.mkdir(parents=True, exist_ok=True)
     profile = canonical_dir / "profile.yaml"
     if overwrite or not profile.exists():
-        profile.write_text("character_id: indigo\nname: Indigo\n")
+        profile.write_text("""character_id: indigo
+name: Indigo
+default_style_id: neutral
+default_background_id: studio
+styles:
+  - id: neutral
+    name: Neutral
+    description: Default clean character presentation.
+    default_background_id: studio
+    workflow_tags: [general]
+    voice:
+      pace: 0.44
+      warmth: 0.62
+      intensity: 0.35
+  - id: cyberpunk
+    name: Cyberpunk
+    description: High-contrast neon treatment intended for coding and technical workflows.
+    default_background_id: cyberpunk-city
+    workflow_tags: [coding, technical, automation]
+    renderer_prompt: neon cyberpunk assistant, crisp high contrast lighting
+    tags: [neon, coding]
+    voice:
+      pace: 0.5
+      warmth: 0.5
+      intensity: 0.48
+      tags: [precise, focused]
+  - id: cozy
+    name: Cozy
+    description: Warm, relaxed treatment intended for long-form writing and ideation.
+    default_background_id: cozy-library
+    workflow_tags: [writing, book, brainstorming]
+    renderer_prompt: cozy warm character lighting, soft library atmosphere
+    tags: [warm, writing]
+    voice:
+      pace: 0.38
+      warmth: 0.82
+      intensity: 0.28
+      tags: [warm, gentle]
+  - id: glitch
+    name: Glitch
+    description: Diagnostic visual treatment for editing, debugging, or system-recovery contexts.
+    default_background_id: glitch-grid
+    workflow_tags: [debugging, editing, system]
+    renderer_prompt: controlled digital glitch effect, diagnostic overlay
+    tags: [debug, glitch]
+    voice:
+      pace: 0.56
+      warmth: 0.42
+      intensity: 0.62
+      tags: [diagnostic]
+backgrounds:
+  - id: studio
+    name: Soft studio
+    kind: gradient
+    value: radial-gradient(circle,#374151,#030712)
+    tags: [neutral]
+  - id: cyberpunk-city
+    name: Cyberpunk city
+    kind: gradient
+    value: linear-gradient(135deg,#111827,#312e81 45%,#ec4899)
+    synced_style_id: cyberpunk
+    tags: [coding, debug]
+  - id: cozy-library
+    name: Cozy library
+    kind: gradient
+    value: linear-gradient(135deg,#422006,#92400e 48%,#f59e0b)
+    synced_style_id: cozy
+    tags: [writing, warm]
+  - id: glitch-grid
+    name: Glitch grid
+    kind: gradient
+    value: linear-gradient(90deg,#020617,#164e63 50%,#7f1d1d)
+    synced_style_id: glitch
+    tags: [debug, system]
+workflow_style_rules:
+  - workflow: coding
+    style_id: cyberpunk
+    background_id: cyberpunk-city
+    description: Use neon technical styling for coding tasks.
+  - workflow: book_writing
+    style_id: cozy
+    background_id: cozy-library
+    description: Use cozy styling for book-writing sessions.
+  - workflow: debugging
+    style_id: glitch
+    background_id: glitch-grid
+    description: Use glitch styling while editing or debugging the avatar system.
+""")
 
     canonical_png = canonical_dir / "canonical.png"
     if overwrite or not canonical_png.exists():

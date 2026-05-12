@@ -11,6 +11,20 @@ class SpeakRequest(BaseModel):
 class ModeRequest(BaseModel):
     mode: str
 
+class CharacterRequest(BaseModel):
+    character_id: str
+
+class StyleRequest(BaseModel):
+    style_id: str
+    sync_background: bool = True
+
+class BackgroundRequest(BaseModel):
+    background_id: str
+    sync_background: bool = False
+
+class WorkflowRequest(BaseModel):
+    workflow: str
+
 class EventRequest(BaseModel):
     event: dict
 
@@ -47,6 +61,30 @@ def build_router(static_dir: str) -> APIRouter:
     @router.post("/api/mode")
     def mode(payload: ModeRequest, request: Request):
         return request.app.state.orchestrator.set_policy_mode(payload.mode)
+    @router.post("/api/character")
+    def character(payload: CharacterRequest, request: Request):
+        try:
+            return request.app.state.orchestrator.set_character(payload.character_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    @router.post("/api/style")
+    def style(payload: StyleRequest, request: Request):
+        try:
+            return request.app.state.orchestrator.set_style(payload.style_id, payload.sync_background)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    @router.post("/api/background")
+    def background(payload: BackgroundRequest, request: Request):
+        try:
+            return request.app.state.orchestrator.set_background(payload.background_id, payload.sync_background)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    @router.post("/api/workflow")
+    def workflow(payload: WorkflowRequest, request: Request):
+        try:
+            return request.app.state.orchestrator.apply_workflow(payload.workflow)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     @router.post("/api/trigger/{state}")
     def trigger(state: str, request: Request):
         return request.app.state.orchestrator.trigger(state)
