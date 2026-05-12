@@ -43,6 +43,7 @@ class LiveTalkingAdapter(Renderer):
         self.last_behavior: AvatarBehaviorState | None = None
         self.endpoint_status: dict[str, dict[str, Any]] = {}
         self.last_latency_ms: int | None = None
+
         self.active_style: VisualStyle | None = None
         self.active_background: BackgroundSpec | None = None
 

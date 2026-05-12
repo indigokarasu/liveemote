@@ -22,10 +22,12 @@ from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
 
 def discover_character_roots(character: str | Path) -> dict[str, Path]:
     root = Path(character)
+    roots: list[Path]
     if (root / "canonical").is_dir():
         roots = [root]
     else:
         roots = sorted(path for path in root.iterdir() if (path / "canonical").is_dir()) if root.exists() else []
+
     catalog: dict[str, Path] = {}
     for candidate in roots:
         index = build_asset_index(candidate)
@@ -54,8 +56,7 @@ class DemoOrchestrator:
         self.active_background_id = self.index.default_background_id
         self.sync_background_to_style = True
         self.runtime = self._new_runtime()
-        self.agent = AgentBridge(agent_mode or self.config.agent.mode, agent_url or self.config.agent.url, agent_harness or self.config.agent.harness)
-        self.hermes = self.agent  # Backward-compatible attribute for existing callers.
+        self.hermes = HermesBridge(hermes_mode, self.config.hermes.url)
         self.renderer = DeepLiveCamAdapter() if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
         self.renderer.load_character(self.index)
         self._notify_renderer_theme()
@@ -77,6 +78,13 @@ class DemoOrchestrator:
             return MossTTSAdapter()
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
+    def _new_runtime(self) -> AffectRuntime:
+        def lookup(state: str) -> str | None:
+            emote = self.index.find_emote(state)
+            return emote.id if emote else None
+
+        return AffectRuntime(self.config, emote_lookup=lookup)
+
     def active_style(self) -> VisualStyle | None:
         return self.index.find_style(self.active_style_id)
 
@@ -88,13 +96,18 @@ class DemoOrchestrator:
         if callable(set_theme):
             set_theme(self.index, self.active_style(), self.active_background())
 
-    def _neutral_avatar(self) -> AvatarBehaviorState:
-        neutral = self.index.find_emote("neutral")
-        return AvatarBehaviorState(mode="idle", affect="neutral", gaze_target="toward_user", emote_id=neutral.id if neutral else None)
+    def _neutral_avatar_state(self) -> AvatarBehaviorState:
+        neutral_emote = self.index.find_emote("neutral")
+        return AvatarBehaviorState(
+            mode="idle",
+            affect="neutral",
+            gaze_target="toward_user",
+            emote_id=neutral_emote.id if neutral_emote else None,
+        )
 
     def _reset_runtime_for_character(self) -> None:
         self.runtime = self._new_runtime()
-        self.runtime.avatar = self._neutral_avatar()
+        self.runtime.avatar = self._neutral_avatar_state()
 
     def status(self) -> dict:
         return {
@@ -134,7 +147,6 @@ class DemoOrchestrator:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
         voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
         return {
-            "agent": self.agent.capability_status(),
             "renderer": renderer_caps,
             "voice": voice_caps,
             "mobile_layout": True,
@@ -169,13 +181,10 @@ class DemoOrchestrator:
             VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}}),
             self.index.voice_reference,
         )
-        if speech.audio_path:
-            self.renderer.speak(speech.audio_path, response.text, behavior)
-        else:
-            self.renderer.set_behavior(behavior)
+        self.renderer.speak(speech.audio_path, response.text, behavior)
         self.runtime.conversation.turn_state = "idle"
-        self.runtime.avatar = self._neutral_avatar()
-        return {**self.status(), "speech": speech.__dict__, "agent_response": asdict(response)}
+        self.runtime.avatar = self._neutral_avatar_state()
+        return {**self.status(), "speech": speech.__dict__}
 
     def set_policy_mode(self, mode: str) -> dict:
         self.runtime.set_mode(mode)
