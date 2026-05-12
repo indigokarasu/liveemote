@@ -11,6 +11,7 @@ from hermes_avatar.voice.base import VoiceStyle
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
 from hermes_avatar.voice.moss_adapter import MossTTSAdapter
+from hermes_avatar.demo.meeting_join import MeetingJoinService
 
 class DemoOrchestrator:
     def __init__(self, character: str, renderer: str = "livetalking", voice_backend: str = "luxtts", hermes_mode: str = "fake", config: AppConfig | None = None) -> None:
@@ -23,6 +24,7 @@ class DemoOrchestrator:
         self.renderer.load_character(self.index)
         self.voice = self._voice_backend(voice_backend)
         self.last_response_text = ""
+        self.meeting = MeetingJoinService(self.renderer)
 
     def _voice_backend(self, backend: str):
         if backend == "elevenlabs":
@@ -32,7 +34,7 @@ class DemoOrchestrator:
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
     def status(self) -> dict:
-        return {"user": self.runtime.user.to_dict(), "conversation": self.runtime.conversation.to_dict(), "avatar": self.runtime.avatar.to_dict(), "mode_policy": self.runtime.mode, "hermes_response_text": self.last_response_text, "character_id": self.index.character_id}
+        return {"user": self.runtime.user.to_dict(), "conversation": self.runtime.conversation.to_dict(), "avatar": self.runtime.avatar.to_dict(), "mode_policy": self.runtime.mode, "hermes_response_text": self.last_response_text, "character_id": self.index.character_id, "meeting": self.meeting.status()}
 
     def apply_event(self, event: dict) -> dict:
         behavior = self.runtime.consume(event)
@@ -67,3 +69,11 @@ class DemoOrchestrator:
             self.runtime.conversation.turn_state = "user_speaking" if state == "listening" else "assistant_thinking"
         self.runtime.tick(int(time.time()*1000))
         return self.status()
+
+    def join_meeting(self, meeting_url: str, display_name: str | None = None) -> dict:
+        meeting = self.meeting.join(meeting_url, display_name)
+        return {**self.status(), "meeting": meeting}
+
+    def leave_meeting(self) -> dict:
+        meeting = self.meeting.leave()
+        return {**self.status(), "meeting": meeting}

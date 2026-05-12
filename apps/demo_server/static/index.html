@@ -1,1 +1,67 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hermes Live Avatar</title><link rel="stylesheet" href="/static/demo.css"></head><body><header><h1>Hermes Live Character Avatar</h1><p>Local affect runtime + voice bridge + LiveTalking adapter demo</p></header><main><section class="stage"><div class="panel"><h2>Local webcam preview</h2><video id="webcam" autoplay muted playsinline></video><p class="note">Frames stay local; browser sends compact telemetry only.</p></div><div class="panel avatar"><h2>Avatar output</h2><div id="avatarCanvas"><span id="avatarFace">◉‿◉</span><small id="watermark">Synthetic avatar output</small></div><audio id="speech" controls></audio></div></section><section class="controls"><button id="speak">Speak test line</button><button id="toggle">Toggle mirror/reflect</button><button data-trigger="listening">Trigger listening</button><button data-trigger="thinking">Trigger thinking</button><button data-trigger="interrupt">Interrupt speech</button><button data-trigger="reset">Reset state</button></section><section class="debug"><h2>Runtime telemetry</h2><dl><dt>Mode</dt><dd id="mode">-</dd><dt>Affect</dt><dd id="affect">-</dd><dt>VAD</dt><dd id="vad">-</dd><dt>Face detected</dt><dd id="face">-</dd><dt>Gaze target</dt><dd id="gaze">-</dd><dt>Active emote</dt><dd id="emote">-</dd><dt>Policy</dt><dd id="policy">-</dd></dl><h3>Hermes response</h3><pre id="response"></pre><h3>Raw state</h3><pre id="raw"></pre></section></main><script src="/static/demo.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Hermes Live Avatar</title>
+  <link rel="stylesheet" href="/static/demo.css">
+</head>
+<body>
+  <header>
+    <h1>Hermes Live Character Avatar</h1>
+    <p>Local affect runtime + voice bridge + LiveTalking adapter demo</p>
+  </header>
+  <main>
+    <section class="stage">
+      <div class="panel">
+        <h2>Local webcam preview</h2>
+        <video id="webcam" autoplay muted playsinline></video>
+        <p class="note">Frames stay local; browser sends compact telemetry only.</p>
+      </div>
+      <div class="panel avatar">
+        <h2>Avatar output</h2>
+        <div id="avatarCanvas"><span id="avatarFace">◉‿◉</span><small id="watermark">Synthetic avatar output</small></div>
+        <audio id="speech" controls></audio>
+      </div>
+    </section>
+    <section class="controls">
+      <button id="speak">Speak test line</button>
+      <button id="toggle">Toggle mirror/reflect</button>
+      <button data-trigger="listening">Trigger listening</button>
+      <button data-trigger="thinking">Trigger thinking</button>
+      <button data-trigger="interrupt">Interrupt speech</button>
+      <button data-trigger="reset">Reset state</button>
+    </section>
+    <section class="panel meeting-test">
+      <h2>Google Meet WebRTC test mode</h2>
+      <p class="note">Paste a Google Meet URL to route the avatar through the real WebRTC meeting path and see join latency.</p>
+      <div class="meeting-row">
+        <input id="meetingUrl" type="url" inputmode="url" placeholder="https://meet.google.com/abc-defg-hij">
+        <input id="meetingName" type="text" placeholder="Hermes Avatar" value="Hermes Avatar">
+        <button id="joinMeeting">Join Meet</button>
+        <button id="leaveMeeting" class="secondary">Leave</button>
+      </div>
+      <dl class="meeting-status">
+        <dt>Meeting status</dt><dd id="meetingStatus">idle</dd>
+        <dt>Join latency</dt><dd id="meetingLatency">-</dd>
+        <dt>Details</dt><dd id="meetingDetail">Paste a Meet URL to start.</dd>
+      </dl>
+    </section>
+    <section class="debug">
+      <h2>Runtime telemetry</h2>
+      <dl>
+        <dt>Mode</dt><dd id="mode">-</dd>
+        <dt>Affect</dt><dd id="affect">-</dd>
+        <dt>VAD</dt><dd id="vad">-</dd>
+        <dt>Face detected</dt><dd id="face">-</dd>
+        <dt>Gaze target</dt><dd id="gaze">-</dd>
+        <dt>Active emote</dt><dd id="emote">-</dd>
+        <dt>Policy</dt><dd id="policy">-</dd>
+      </dl>
+      <h3>Hermes response</h3><pre id="response"></pre>
+      <h3>Raw state</h3><pre id="raw"></pre>
+    </section>
+  </main>
+  <script src="/static/demo.js"></script>
+</body>
+</html>

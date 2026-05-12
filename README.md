@@ -80,6 +80,13 @@ For a dependency-light demo path using fake Hermes:
 make demo-fake-hermes CHARACTER=./character_input
 ```
 
+
+## Google Meet WebRTC test mode
+
+The browser demo includes a **Google Meet WebRTC test mode** panel for checking the avatar path against real meeting latency. Paste a Meet link such as `https://meet.google.com/abc-defg-hij`, optionally set the participant name, and click **Join Meet**. The demo validates Meet URLs, asks the LiveTalking adapter to join through `/avatar/join_meeting`, and reports the measured local join handoff latency in the UI.
+
+If the running LiveTalking process does not yet expose meeting-join support, the local demo falls back to opening a Chromium-family browser with WebRTC camera/microphone permissions pre-approved. Google may still require sign-in, lobby confirmation, or host admission before the avatar appears in the meeting.
+
 ## Launch virtual camera mode
 
 ```bash

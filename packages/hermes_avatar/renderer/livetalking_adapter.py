@@ -38,6 +38,12 @@ class LiveTalkingAdapter(Renderer):
     def start_virtualcam(self) -> None:
         self._post("/avatar/start_virtualcam", {}, optional=True)
 
+    def join_meeting(self, meeting_url: str, display_name: str = "Hermes Avatar") -> dict:
+        return self._post("/avatar/join_meeting", {"meeting_url": meeting_url, "display_name": display_name}, optional=True)
+
+    def leave_meeting(self) -> dict:
+        return self._post("/avatar/leave_meeting", {}, optional=True)
+
     def _post(self, path: str, payload: dict, optional: bool = False) -> dict:
         try:
             with httpx.Client(timeout=1.5) as client:
