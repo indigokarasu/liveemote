@@ -64,7 +64,19 @@ character_input/
 
 Supported emote media: `.png`, `.jpg`, `.webp`, `.mp4`, `.mov`, `.webm`. Optional paired `.wav` files are currently ignored unless explicitly tagged later.
 
-The ingest path builds a `CharacterIndex` containing the canonical image, optional voice reference, optional ElevenLabs voice id, and discovered emotes with deterministic ids such as `listening_001`.
+The ingest path builds a `CharacterIndex` containing the canonical image, optional voice reference, optional ElevenLabs voice id, discovered emotes with deterministic ids such as `listening_001`, and a `training_references` manifest for renderer/model backends. The canonical image is always included as an `identity_anchor`; every static emote image (`.png`, `.jpg`, `.jpeg`, `.webp`) is also included as an `expression_reference` with its emote state and tags. Videos remain playable emotes but are not added as training references because most identity-consistency training or image-reference pipelines expect still frames.
+
+### Using ~30 emote images for a consistent character
+
+Place the images under state folders in `character_input/emotes/<state>/` and keep `character_input/canonical/canonical.png` as the clean neutral identity anchor. For example, put multiple happy images in `emotes/happy/`, sad images in `emotes/sad/`, and attentive/listening images in `emotes/listening/`. When `build_asset_index()` runs, all supported static images are included in `CharacterIndex.training_references`, so a renderer can train or condition on the same character across expression states while still using deterministic emote ids for playback.
+
+Recommended dataset hygiene for consistency:
+
+- Use the same character design, outfit, camera angle range, crop, and background style across all expression images.
+- Keep one high-quality neutral/canonical image; it receives the strongest identity-anchor role.
+- Spread the ~30 images across expression states instead of putting all of them in one folder, so the manifest labels the expression coverage.
+- Avoid mixing different art styles or revised character designs unless you intend the model to learn that variation.
+
 
 ## Launch the WebRTC/browser demo
 

@@ -62,8 +62,18 @@ class AffectRuntime:
         self.user.attention = ema(self.user.attention, target_attention, a)
         dominant, conf = self._dominant_expression(data.get("expression", {}))
         self.user.dominant_expression = self.expression_latch.update(dominant, conf, int(data.get("timestamp_ms", self._now())))
+        expression_arousal = (
+            0.65
+            if dominant in {"happy", "frustrated"}
+            else 0.25
+            if dominant == "sad"
+            else 0.1
+            if dominant == "tired"
+            else 0.2
+        )
         self.user.valence = ema(self.user.valence, 0.5 if dominant == "happy" else -0.4 if dominant in {"sad", "frustrated"} else 0.0, self.config.affect.smoothing.affect_alpha)
         self.user.tension = ema(self.user.tension, 0.7 if dominant == "frustrated" else 0.25, self.config.affect.smoothing.affect_alpha)
+        self.user.arousal = ema(self.user.arousal, expression_arousal, self.config.affect.smoothing.affect_alpha)
         self.user.last_updated_ms = int(data.get("timestamp_ms", self._now()))
 
     def _update_audio(self, data: dict) -> None:
@@ -72,6 +82,12 @@ class AffectRuntime:
         self.user.speaking = speaking
         self.user.speech_energy = ema(self.user.speech_energy, float(data.get("energy", 0)), a)
         self.user.speech_rate = ema(self.user.speech_rate, float(data.get("speech_rate", 0)), a)
+        vocal_arousal = clamp(
+            (self.user.speech_energy * 0.65) + (self.user.speech_rate * 0.35),
+            0.0,
+            1.0,
+        )
+        self.user.arousal = ema(self.user.arousal, vocal_arousal, self.config.affect.smoothing.affect_alpha)
         now = int(data.get("timestamp_ms", self._now()))
         if speaking:
             self._last_speaking_ms = now

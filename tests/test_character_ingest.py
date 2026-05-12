@@ -10,3 +10,7 @@ def test_default_character_index_builds():
     assert index.canonical_image.endswith("canonical.png")
     assert index.voice_reference and index.voice_reference.endswith("voice_reference.wav")
     assert any(e.state == "listening" for e in index.emotes)
+    assert index.training_references[0].role == "identity_anchor"
+    assert index.training_references[0].path.endswith("canonical.png")
+    assert any(ref.state == "listening" for ref in index.expression_references())
+    assert index.expression_references("listening")[0].id == "listening_expression_001"
