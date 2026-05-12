@@ -13,6 +13,8 @@ class PerceptionFrameEvent(BaseEvent):
     head_yaw: float = 0.0
     head_pitch: float = 0.0
     expression: dict[str, float] = Field(default_factory=dict)
+    emotion_confidence: float = 0.0
+    gaze_confidence: float = 0.0
 
 class AudioVADEvent(BaseEvent):
     type: Literal["audio.vad"] = "audio.vad"
@@ -33,6 +35,7 @@ class AvatarBehaviorEvent(BaseEvent):
     emote_id: str | None = None
     intensity: float = 0.0
     lip_sync_enabled: bool = False
+    full_body_pose: str = "standing_idle"
 
 class AvatarSpeakEvent(BaseEvent):
     type: Literal["avatar.speak"] = "avatar.speak"

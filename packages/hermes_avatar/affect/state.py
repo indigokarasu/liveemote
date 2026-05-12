@@ -20,6 +20,8 @@ class UserAffectState:
     gaze_direction: str = "unknown"
     head_yaw: float = 0.0
     head_pitch: float = 0.0
+    gaze_confidence: float = 0.0
+    emotion_confidence: float = 0.0
     last_updated_ms: int = 0
 
     def to_dict(self) -> dict:
@@ -48,6 +50,7 @@ class AvatarBehaviorState:
     lip_sync_enabled: bool = False
     mirror_strength: float = 0.0
     delay_ms: int = 0
+    full_body_pose: str = "standing_idle"
 
     def to_dict(self) -> dict:
         return asdict(self)

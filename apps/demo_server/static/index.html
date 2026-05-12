@@ -9,18 +9,21 @@
 <body>
   <header>
     <h1>Hermes Live Character Avatar</h1>
-    <p>Local affect runtime + voice bridge + LiveTalking adapter demo</p>
+    <p>Local affect runtime + voice bridge + LiveTalking adapter demo with capability checks, browser perception, visual styles, and character controls.</p>
   </header>
   <main>
     <section class="stage">
       <div class="panel">
         <h2>Local webcam preview</h2>
         <video id="webcam" autoplay muted playsinline></video>
-        <p class="note">Frames stay local; browser sends compact telemetry only.</p>
+        <p class="note">Frames stay local; the browser sends face-box, gaze, expression, and audio VAD telemetry.</p>
       </div>
       <div class="panel avatar">
         <h2>Avatar output</h2>
-        <div id="avatarCanvas"><span id="avatarFace">◉‿◉</span><small id="watermark">Synthetic avatar output</small></div>
+        <div id="avatarCanvas">
+          <div id="avatarBody"><span id="avatarFace">◉‿◉</span><span class="torso"></span><span class="arm left"></span><span class="arm right"></span></div>
+          <small id="watermark">Synthetic avatar output</small>
+        </div>
         <audio id="speech" controls></audio>
       </div>
     </section>
@@ -49,7 +52,7 @@
     </section>
     <section class="panel meeting-test">
       <h2>Google Meet WebRTC test mode</h2>
-      <p class="note">Paste a Google Meet URL to route the avatar through the real WebRTC meeting path and see join latency.</p>
+      <p class="note">Paste a Google Meet URL to route the avatar through the WebRTC meeting path and see join latency.</p>
       <div class="meeting-row">
         <input id="meetingUrl" type="url" inputmode="url" placeholder="https://meet.google.com/abc-defg-hij">
         <input id="meetingName" type="text" placeholder="Hermes Avatar" value="Hermes Avatar">
@@ -70,6 +73,10 @@
         <dt>VAD</dt><dd id="vad">-</dd>
         <dt>Face detected</dt><dd id="face">-</dd>
         <dt>Gaze target</dt><dd id="gaze">-</dd>
+        <dt>Confidence</dt><dd id="confidence">-</dd>
+        <dt>Body pose</dt><dd id="bodyPose">-</dd>
+        <dt>Voice</dt><dd id="voiceStatus">-</dd>
+        <dt>Renderer</dt><dd id="rendererStatus">-</dd>
         <dt>Active emote</dt><dd id="emote">-</dd>
         <dt>Policy</dt><dd id="policy">-</dd>
         <dt>Character</dt><dd id="character">-</dd>

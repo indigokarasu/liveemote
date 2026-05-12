@@ -16,6 +16,8 @@ class SynthesizedSpeech:
     sample_rate: int = 48000
     duration_ms: int | None = None
     backend: str = "unknown"
+    latency_ms: int | None = None
+    engine: str | None = None
 
 class VoiceBackend(ABC):
     @abstractmethod
