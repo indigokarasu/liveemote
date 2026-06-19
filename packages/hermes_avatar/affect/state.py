@@ -9,7 +9,6 @@ AvatarMode = Literal["idle", "listening", "thinking", "speaking", "recovering"]
 class UserAffectState:
     face_detected: bool = False
     attention: float = 0.0
-    engagement: float = 0.0
     valence: float = 0.0
     arousal: float = 0.0
     tension: float = 0.0
@@ -34,7 +33,6 @@ class ConversationState:
     user_turn_ms: int = 0
     assistant_turn_ms: int = 0
     interruption_risk: float = 0.0
-    topic_weight: float = 0.0
     tension: float = 0.0
 
     def to_dict(self) -> dict:
