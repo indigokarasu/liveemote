@@ -414,37 +414,4 @@ def build_asset_index(
             tags=list(data.get("tags", [])),
             training_reference=data.get("training_reference"),
         )
-            expression_ref_idx = 1
-            emote_idx = 1
-            for asset in sorted(state_dir.iterdir()):
-                suffix = asset.suffix.lower()
-                if not asset.is_file() or suffix not in SUPPORTED_EMOTE_EXTS:
-                    continue
-
-                tags = tags_for(asset, state)
-                is_video = suffix in video_exts
-                index.emotes.append(
-                    EmoteAsset(
-                        id=f"{state}_{emote_idx:03d}",
-                        path=str(asset),
-                        state=state,
-                        loopable=is_video,
-                        duration_ms=2800 if is_video else None,
-                        tags=tags,
-                    )
-                )
-                emote_idx += 1
-
-                if suffix in SUPPORTED_TRAINING_IMAGE_EXTS:
-                    index.training_references.append(
-                        TrainingReference(
-                            id=f"{state}_expression_{expression_ref_idx:03d}",
-                            path=str(asset),
-                            role="expression_reference",
-                            state=state,
-                            weight=_reference_weight(state),
-                            tags=tags + ["expression", state],
-                        )
-                    )
-                    expression_ref_idx += 1
     return index
