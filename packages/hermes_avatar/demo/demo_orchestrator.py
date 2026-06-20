@@ -41,11 +41,6 @@ def discover_character_catalog(
     return character_roots, character_catalog
 
 
-def discover_character_roots(character: str | Path) -> dict[str, Path]:
-    character_roots, _ = discover_character_catalog(character)
-    return character_roots
-
-
 class DemoOrchestrator:
     def __init__(
         self,
