@@ -28,12 +28,6 @@ agent:
   url: ws://127.0.0.1:18789/avatar
   send_events: [user.transcript, affect.summary, interruption]
   receive_events: [agent.response, agent.behavior_hint]
-hermes:
-  mode: fake
-  harness: hermes
-  url: ws://127.0.0.1:18789/avatar
-  send_events: [user.transcript, affect.summary, interruption]
-  receive_events: [hermes.response, hermes.behavior_hint]
 renderer:
   livetalking_url: http://127.0.0.1:8010
 voice:
