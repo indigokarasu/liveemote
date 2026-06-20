@@ -14,8 +14,10 @@ def test_default_character_index_builds():
     assert any(e.state == "listening" for e in index.emotes)
     assert index.training_references[0].role == "identity_anchor"
     assert index.training_references[0].path.endswith("canonical.png")
-    assert any(ref.state == "listening" for ref in index.expression_references())
-    assert index.expression_references("listening")[0].id == "listening_expression_001"
+    expr_refs = [ref for ref in index.training_references if ref.role == "expression_reference"]
+    assert any(ref.state == "listening" for ref in expr_refs)
+    listening_refs = [ref for ref in expr_refs if ref.state == "listening"]
+    assert listening_refs[0].id == "listening_expression_001"
 
 
 def test_character_styles_backgrounds_and_workflow_rules_load():
@@ -90,9 +92,10 @@ emotes:
     assert index.find_emote("wink").path.endswith("outside_wink.webp")
     assert [emote.variant for emote in index.emotes_for("greeting")] == ["wave", "nod"]
     assert index.find_emote("greeting", tags={"intro"}).variant == "wave"
-    assert any(ref.state == "wink" for ref in index.expression_references())
+    expr_refs = [ref for ref in index.training_references if ref.role == "expression_reference"]
+    assert any(ref.state == "wink" for ref in expr_refs)
     assert not any(
-        ref.path.endswith("nod.mp4") for ref in index.expression_references()
+        ref.path.endswith("nod.mp4") for ref in expr_refs
     )
 
 

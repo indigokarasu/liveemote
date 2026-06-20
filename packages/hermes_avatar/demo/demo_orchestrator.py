@@ -260,11 +260,3 @@ class DemoOrchestrator:
         meeting = self.meeting.leave()
         return {**self.status(), "meeting": meeting}
 
-    def safe_audio_roots(self) -> list[Path]:
-        return [Path(self.config.voice.cache_dir).resolve()]
-
-    def select_character(self, character_path: str) -> dict:
-        selected = build_asset_index(character_path)
-        self.character_roots[selected.character_id] = Path(character_path)
-        self.character_catalog[selected.character_id] = selected
-        return self.set_character(selected.character_id)
