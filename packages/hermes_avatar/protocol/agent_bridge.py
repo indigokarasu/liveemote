@@ -7,7 +7,7 @@ import json
 import httpx
 import websockets
 
-from hermes_avatar.affect.state import ConversationState, UserAffectState
+from hermes_avatar.affect.state import UserAffectState
 
 OFFLINE_MODES = {"none", "off", "offline", "disabled", "no_llm", "no-llm"}
 FAKE_MODES = {"fake", "mock", "local"}
@@ -115,22 +115,3 @@ def normalize_agent_response(data: dict[str, Any], source: str = "external") -> 
     if not isinstance(tags, dict):
         tags = {"value": tags}
     return AgentResponse(text=str(text), tags=tags, source=str(data.get("source") or source))
-
-
-def affect_summary(user: UserAffectState, conversation: ConversationState, window_ms: int = 3000) -> dict[str, Any]:
-    return {
-        "type": "affect.summary",
-        "window_ms": window_ms,
-        "user": {
-            "speaking": user.speaking,
-            "attention": user.attention,
-            "valence": user.valence,
-            "arousal": user.arousal,
-            "dominant_expression": user.dominant_expression,
-        },
-        "conversation": {
-            "turn_state": conversation.turn_state,
-            "interruption_risk": conversation.interruption_risk,
-            "tension": conversation.tension,
-        },
-    }
