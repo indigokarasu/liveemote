@@ -43,9 +43,6 @@ class AgentConfig(BaseModel):
     receive_events: list[str] = Field(default_factory=lambda: ["agent.response", "agent.behavior_hint"])
 
 
-class HermesConfig(AgentConfig):
-    receive_events: list[str] = Field(default_factory=lambda: ["hermes.response", "hermes.behavior_hint"])
-
 class RendererConfig(BaseModel):
     livetalking_url: str = "http://127.0.0.1:8010"
 
@@ -59,7 +56,6 @@ class AppConfig(BaseModel):
     gaze: GazeConfig = Field(default_factory=GazeConfig)
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
-    hermes: HermesConfig = Field(default_factory=HermesConfig)
     renderer: RendererConfig = Field(default_factory=RendererConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
 
