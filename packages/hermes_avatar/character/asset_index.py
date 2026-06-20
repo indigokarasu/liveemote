@@ -1,7 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-import json
 
 SUPPORTED_TRAINING_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_VIDEO_EMOTE_EXTS = {".mp4", ".mov", ".webm"}
@@ -90,9 +89,6 @@ class CharacterIndex:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def write_json(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2))
-
     def emotes_for(
         self,
         state: str,
@@ -124,12 +120,3 @@ class CharacterIndex:
             return None
         return next((bg for bg in self.backgrounds if bg.id == background_id), None)
 
-    def expression_references(
-        self, state: str | None = None
-    ) -> list[TrainingReference]:
-        return [
-            ref
-            for ref in self.training_references
-            if ref.role == "expression_reference"
-            and (state is None or ref.state == state)
-        ]

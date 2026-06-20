@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
 from pydantic import BaseModel
+from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.demo.meeting_join import MeetingJoinError
 
 class SpeakRequest(BaseModel):
@@ -43,7 +44,7 @@ def build_router(static_dir: str) -> APIRouter:
     @router.get("/api/audio")
     def audio(path: str, request: Request):
         audio_path = Path(path).resolve()
-        roots = request.app.state.orchestrator.safe_audio_roots()
+        roots = [Path(request.app.state.orchestrator.config.voice.cache_dir).resolve()]
         if audio_path.suffix.lower() != ".wav":
             raise HTTPException(status_code=404, detail="Audio not found")
         if not any(audio_path.is_relative_to(root) for root in roots):
@@ -92,7 +93,11 @@ def build_router(static_dir: str) -> APIRouter:
         return request.app.state.orchestrator.trigger(state)
     @router.post("/api/character/select")
     def select_character(payload: CharacterSelectRequest, request: Request):
-        return request.app.state.orchestrator.select_character(payload.character_path)
+        orchestrator = request.app.state.orchestrator
+        selected = build_asset_index(payload.character_path)
+        orchestrator.character_roots[selected.character_id] = Path(payload.character_path)
+        orchestrator.character_catalog[selected.character_id] = selected
+        return orchestrator.set_character(selected.character_id)
     @router.post("/api/meeting/join")
     def join_meeting(payload: MeetingJoinRequest, request: Request):
         try:

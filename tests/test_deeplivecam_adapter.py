@@ -12,7 +12,7 @@ def test_deeplivecam_canonical_only_character_activates_replacement(tmp_path):
     (canonical_dir / "canonical.png").write_bytes(PNG_1X1_RGBA)
 
     index = build_asset_index(character)
-    assert index.expression_references() == []
+    assert [ref for ref in index.training_references if ref.role == "expression_reference"] == []
 
     adapter = DeepLiveCamAdapter(enabled=True)
     adapter.load_character(index)
