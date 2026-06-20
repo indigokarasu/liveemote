@@ -16,7 +16,6 @@ from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
 from hermes_avatar.voice.base import VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
-from hermes_avatar.voice.moss_adapter import MossTTSAdapter
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
 
 
@@ -79,8 +78,6 @@ class DemoOrchestrator:
             return NoopVoiceAdapter()
         if normalized == "elevenlabs":
             return ElevenLabsAdapter(cache_dir=self.config.voice.cache_dir)
-        if normalized == "moss":
-            return MossTTSAdapter()
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
     def _new_runtime(self) -> AffectRuntime:
