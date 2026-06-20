@@ -80,8 +80,6 @@ function updateControls(s) {
   updatingControls = false;
 }
 
-function fmt(v) { return Number(v || 0).toFixed(2); }
-
 function update(s) {
   const a = s.avatar || {};
   const u = s.user || {};
@@ -115,7 +113,6 @@ function update(s) {
   if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
   return s;
 }
-
 function updateCharacterPaths(characters, activeId) {
   const selected = els.characterPathSelect.value;
   els.characterPathSelect.innerHTML = '';
