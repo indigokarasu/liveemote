@@ -23,24 +23,17 @@ class AffectConfig(BaseModel):
 
 class GazeConfig(BaseModel):
     enabled: bool = True
-    eye_lead_ms: int = 120
-    head_follow_ms: int = 450
     max_yaw_deg: float = 12
     max_pitch_deg: float = 8
-    micro_saccades: bool = True
 
 class BehaviorConfig(BaseModel):
     default_mode: str = "reflect"
     mirroring_strength: float = 0.22
-    expressiveness: float = 0.42
-    avoid_constant_eye_contact: bool = True
 
 class AgentConfig(BaseModel):
     mode: str = "fake"
     harness: str = "generic"
     url: str = "ws://127.0.0.1:18789/avatar"
-    send_events: list[str] = Field(default_factory=lambda: ["user.transcript", "affect.summary", "interruption"])
-    receive_events: list[str] = Field(default_factory=lambda: ["agent.response", "agent.behavior_hint"])
 
 
 class RendererConfig(BaseModel):

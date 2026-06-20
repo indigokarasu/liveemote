@@ -26,11 +26,9 @@ class DeepLiveCamAdapter(Renderer):
     def __init__(
         self,
         enabled: bool = False,
-        allow_identity_output: bool = False,
         vendor_dir: str = "vendor/Deep-Live-Cam",
     ) -> None:
         self.enabled = enabled
-        self.allow_identity_output = allow_identity_output
         self.vendor_dir = Path(vendor_dir)
         self.watermark = "Synthetic avatar output - consent required for real identities"
         self.character_index: CharacterIndex | None = None
@@ -54,7 +52,6 @@ class DeepLiveCamAdapter(Renderer):
             "canonical_image": self.character_index.canonical_image if self.character_index else None,
             "vendor_dir_exists": self.vendor_dir.exists(),
             "watermark": self.watermark,
-            "allow_identity_output": self.allow_identity_output,
             "error": self.last_error,
         }
 

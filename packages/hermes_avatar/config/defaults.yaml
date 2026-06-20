@@ -12,22 +12,15 @@ affect:
     affect_alpha: 0.25
 gaze:
   enabled: true
-  eye_lead_ms: 120
-  head_follow_ms: 450
   max_yaw_deg: 12
   max_pitch_deg: 8
-  micro_saccades: true
 behavior:
   default_mode: reflect
   mirroring_strength: 0.22
-  expressiveness: 0.42
-  avoid_constant_eye_contact: true
 agent:
   mode: fake
   harness: generic
   url: ws://127.0.0.1:18789/avatar
-  send_events: [user.transcript, affect.summary, interruption]
-  receive_events: [agent.response, agent.behavior_hint]
 renderer:
   livetalking_url: http://127.0.0.1:8010
 voice:

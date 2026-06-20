@@ -9,7 +9,6 @@ from .websocket_api import websocket_endpoint
 from hermes_avatar.demo.demo_orchestrator import DemoOrchestrator
 
 def create_app(args=None) -> FastAPI:
-    args = args or argparse.Namespace(character="./character_input", renderer="livetalking", voice_backend="luxtts", transport="webrtc", agent_mode="fake", agent_url=None, agent_harness="generic", hermes_mode=None)
     app = FastAPI(title="Hermes Live Avatar Demo")
     static = Path(__file__).with_name("static")
     agent_mode = getattr(args, "agent_mode", None) or getattr(args, "hermes_mode", None) or "fake"
@@ -24,7 +23,6 @@ def parse_args():
     p.add_argument("--character", default="./character_input")
     p.add_argument("--renderer", default="livetalking", choices=["livetalking", "deeplivecam"])
     p.add_argument("--voice-backend", default="luxtts", choices=["luxtts", "elevenlabs", "moss", "none"])
-    p.add_argument("--transport", default="webrtc", choices=["webrtc", "virtualcam", "browser"])
     p.add_argument("--agent-mode", default=None, choices=["fake", "external", "offline", "none", "openclaw", "hermes", "deerflow"])
     p.add_argument("--agent-url", default=None)
     p.add_argument("--agent-harness", default="generic")
