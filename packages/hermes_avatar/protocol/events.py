@@ -28,24 +28,8 @@ class AgentResponseEvent(BaseEvent):
     tags: dict[str, Any] = Field(default_factory=dict)
 
 
-HermesResponseEvent = AgentResponseEvent
 
-class AvatarBehaviorEvent(BaseEvent):
-    type: Literal["avatar.behavior"] = "avatar.behavior"
-    mode: str
-    affect: str
-    gaze_target: str
-    emote_id: str | None = None
-    intensity: float = 0.0
-    lip_sync_enabled: bool = False
-    full_body_pose: str = "standing_idle"
 
-class AvatarSpeakEvent(BaseEvent):
-    type: Literal["avatar.speak"] = "avatar.speak"
-    text: str
-    audio_path: str
-    affect: str
-    voice_style: dict[str, Any] = Field(default_factory=dict)
 
 def parse_event(payload: dict[str, Any]) -> BaseEvent:
     mapping = {
@@ -53,8 +37,6 @@ def parse_event(payload: dict[str, Any]) -> BaseEvent:
         "audio.vad": AudioVADEvent,
         "hermes.response": AgentResponseEvent,
         "agent.response": AgentResponseEvent,
-        "avatar.behavior": AvatarBehaviorEvent,
-        "avatar.speak": AvatarSpeakEvent,
     }
     model = mapping.get(payload.get("type"), BaseEvent)
     return model.model_validate(payload)
