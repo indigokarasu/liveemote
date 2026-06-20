@@ -22,16 +22,13 @@ class AudioVADEvent(BaseEvent):
     energy: float = 0.0
     speech_rate: float = 0.0
 
-class HermesResponseEvent(BaseEvent):
-    type: Literal["hermes.response"] = "hermes.response"
-    text: str
-    tags: dict[str, Any] = Field(default_factory=dict)
-
-
 class AgentResponseEvent(BaseEvent):
     type: Literal["agent.response"] = "agent.response"
     text: str
     tags: dict[str, Any] = Field(default_factory=dict)
+
+
+HermesResponseEvent = AgentResponseEvent
 
 class AvatarBehaviorEvent(BaseEvent):
     type: Literal["avatar.behavior"] = "avatar.behavior"
@@ -54,7 +51,7 @@ def parse_event(payload: dict[str, Any]) -> BaseEvent:
     mapping = {
         "perception.frame": PerceptionFrameEvent,
         "audio.vad": AudioVADEvent,
-        "hermes.response": HermesResponseEvent,
+        "hermes.response": AgentResponseEvent,
         "agent.response": AgentResponseEvent,
         "avatar.behavior": AvatarBehaviorEvent,
         "avatar.speak": AvatarSpeakEvent,
