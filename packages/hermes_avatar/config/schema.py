@@ -77,6 +77,40 @@ class VoiceConfig(BaseModel):
     device: str = "cpu"
     cache_dir: str = "cache/voice"
 
+class FaceSwapConfig(BaseModel):
+    """Configuration for the face-swap renderer adapter.
+
+    The adapter is backend-agnostic: it can drive FaceFusion (recommended,
+    modular + job-based) or Deep-Live-Cam (vendored). All fields are optional
+    and safe to leave at defaults — when the backend binary, models, or GPU are
+    unavailable the adapter degrades to a transparent passthrough instead of
+    crashing.
+
+    Environment overrides follow the existing nested pattern, e.g.::
+
+        FACESWAP__BACKEND=facefusion
+        FACESWAP__ENABLED=true
+        FACESWAP__DEVICE=cuda
+        FACESWAP__INPUT_SOURCE=rtsp://127.0.0.1:8554/avatar
+        FACESWAP__OUTPUT_VIRTUAL_CAM=/dev/video10
+    """
+
+    backend: str = "facefusion"  # "facefusion" | "deeplivecam"
+    enabled: bool = False
+    source_face_path: str | None = None
+    model_paths: dict[str, str] = Field(default_factory=dict)
+    device: str = "cpu"  # "cpu" | "cuda"
+    input_source: str = "http://127.0.0.1:8010"  # LiveTalking URL / /dev/videoN / rtsp / stream
+    output_virtual_cam: str | None = None  # v4l2loopback device, e.g. /dev/video10
+    output_stream_url: str | None = None  # alternative stream sink (rtsp/webrtc)
+    frame_rate: int = 25
+    swap_threshold: float = 0.0  # min face-detection confidence to attempt a swap
+    vendor_dir: str = "vendor/FaceFusion"
+    backend_binary: str | None = None  # explicit CLI/binary name if not on PATH
+    models_dir: str = "models"
+    require_gpu: bool = False
+    process_timeout: float = 30.0  # seconds to wait for backend startup acknowledgement
+
 class AppConfig(BaseModel):
     affect: AffectConfig = Field(default_factory=AffectConfig)
     gaze: GazeConfig = Field(default_factory=GazeConfig)
@@ -84,6 +118,7 @@ class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     renderer: RendererConfig = Field(default_factory=RendererConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    faceswap: FaceSwapConfig = Field(default_factory=FaceSwapConfig)
     hardware_profile: dict[str, Any] | None = None
     debug: bool = False
 
