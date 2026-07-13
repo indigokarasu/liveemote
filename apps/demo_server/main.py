@@ -5,23 +5,9 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from .routes import build_router
+from .routes import build_router, REQUEST_COUNT, REQUEST_LATENCY
 from .websocket_api import websocket_endpoint
 from hermes_avatar.demo.demo_orchestrator import DemoOrchestrator
-from prometheus_client import Counter, Histogram
-
-# Prometheus metrics for middleware
-REQUEST_COUNT = Counter(
-    'demo_server_requests_total',
-    'Total number of HTTP requests',
-    ['method', 'endpoint', 'http_status']
-)
-
-REQUEST_LATENCY = Histogram(
-    'demo_server_request_duration_seconds',
-    'HTTP request latency in seconds',
-    ['method', 'endpoint']
-)
 
 def create_app(args=None) -> FastAPI:
     app = FastAPI(title="Hermes Live Avatar Demo")
