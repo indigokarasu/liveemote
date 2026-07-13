@@ -10,7 +10,8 @@ def validate_character_folder(root: str | Path) -> list[str]:
     warnings: list[str] = []
     canonical = root / "canonical" / "canonical.png"
     if not canonical.exists():
-        raise CharacterValidationError(f"Missing required canonical image: {canonical}")
+        warnings.append(f"Missing canonical image: {canonical}")
+        return warnings
     emotes = root / "emotes"
     if not emotes.exists():
         warnings.append("No emotes directory found; runtime will use canonical still image.")
