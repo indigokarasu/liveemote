@@ -1,15 +1,51 @@
 from __future__ import annotations
 import argparse
+import time
 from pathlib import Path
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from .routes import build_router
 from .websocket_api import websocket_endpoint
 from hermes_avatar.demo.demo_orchestrator import DemoOrchestrator
+from prometheus_client import Counter, Histogram
+
+# Prometheus metrics for middleware
+REQUEST_COUNT = Counter(
+    'demo_server_requests_total',
+    'Total number of HTTP requests',
+    ['method', 'endpoint', 'http_status']
+)
+
+REQUEST_LATENCY = Histogram(
+    'demo_server_request_duration_seconds',
+    'HTTP request latency in seconds',
+    ['method', 'endpoint']
+)
 
 def create_app(args=None) -> FastAPI:
     app = FastAPI(title="Hermes Live Avatar Demo")
+    
+    # Add middleware for collecting HTTP metrics
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        start_time = time.time()
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        
+        endpoint = request.url.path
+        REQUEST_COUNT.labels(
+            method=request.method,
+            endpoint=endpoint,
+            http_status=response.status_code
+        ).inc()
+        REQUEST_LATENCY.labels(
+            method=request.method,
+            endpoint=endpoint
+        ).observe(process_time)
+        
+        return response
+    
     static = Path(__file__).with_name("static")
     agent_mode = getattr(args, "agent_mode", None) or getattr(args, "hermes_mode", None) or "fake"
     app.state.orchestrator = DemoOrchestrator(args.character, args.renderer, args.voice_backend, agent_mode, agent_url=getattr(args, "agent_url", None), agent_harness=getattr(args, "agent_harness", "generic"))
@@ -26,7 +62,6 @@ def parse_args():
     p.add_argument("--agent-mode", default=None, choices=["fake", "external", "offline", "none", "openclaw", "hermes", "deerflow"])
     p.add_argument("--agent-url", default=None)
     p.add_argument("--agent-harness", default="generic")
-    p.add_argument("--hermes-mode", default=None, choices=["fake", "external", "offline", "none"], help="Backward-compatible alias for --agent-mode")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
     return p.parse_args()
