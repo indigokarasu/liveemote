@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import time
+from collections.abc import Callable
 from hermes_avatar.config.schema import AppConfig, load_config
 from .state import (
     UserAffectState,
@@ -28,16 +29,16 @@ _AFFECT_NONE = "neutral"
 
 class AffectRuntime:
     def __init__(self, config: AppConfig | None = None, emote_lookup=None) -> None:
-        self.config = config or load_config()
-        self.user = UserAffectState()
-        self.conversation = ConversationState()
-        self.avatar = AvatarBehaviorState()
-        self.mode = self.config.behavior.default_mode
+        self.config: AppConfig = config or load_config()
+        self.user: UserAffectState = UserAffectState()
+        self.conversation: ConversationState = ConversationState()
+        self.avatar: AvatarBehaviorState = AvatarBehaviorState()
+        self.mode: str = self.config.behavior.default_mode
         self.hermes_tags: dict | None = None
-        self.expression_latch = ExpressionLatch(dwell_ms=self.config.affect.min_emote_dwell_ms)
-        self.emote_lookup = emote_lookup or (lambda state: None)
-        self._last_tick_ms = self._now()
-        self._last_speaking_ms = 0
+        self.expression_latch: ExpressionLatch = ExpressionLatch(dwell_ms=self.config.affect.min_emote_dwell_ms)
+        self.emote_lookup: Callable[[str], str | None] = emote_lookup or (lambda state: None)
+        self._last_tick_ms: int = self._now()
+        self._last_speaking_ms: int = 0
         # Bounded, most-recent-last history of tick outputs for the
         # debug/visualization endpoint. Each entry carries the active trace id
         # so a developer can correlate a tick with the request that caused it.
@@ -69,6 +70,14 @@ class AffectRuntime:
         return self.tick(data.get("timestamp_ms") or self._now())
 
     def _dominant_expression(self, expr: dict) -> tuple[str, float]:
+        """Map a raw facial-expression vector to the dominant labeled expression.
+
+        Uses a small priority cascade (frustration > sadness > happiness > fatigue)
+        rather than a softmax: the avatar only needs one legible expression at a
+        time, and hard thresholds keep transient micro-expressions from flickering
+        the face. Returns ``(label, confidence)``; ``confidence`` is the raw driver
+        value (smile/frown) used later by the ExpressionLatch to debounce switches.
+        """
         smile, frown = expr.get("smile", 0.0), expr.get("frown", 0.0)
         brow, eye = expr.get("brow_raise", 0.0), expr.get("eye_open", 0.5)
         if frown > 0.55 and brow > 0.25:
@@ -81,7 +90,38 @@ class AffectRuntime:
             return "tired", 1 - eye
         return "neutral", 0.3
 
+    def _expression_affect_targets(self, dominant: str) -> tuple[float, float, float]:
+        """Translate the dominant facial expression into affect-axis targets.
+
+        Each axis is a *target* that the exponential moving average in ``_update_face``
+        eases toward, not an instantaneous value, so the avatar's mood transitions
+        smoothly instead of snapping. The mapping encodes the intended emotional read:
+        happiness lifts valence and arousal; sadness/frustration pull valence negative
+        and raise tension (frustration most of all); tiredness and the neutral baseline
+        keep arousal low and tension mild.
+        """
+        arousal = (
+            0.65
+            if dominant in {"happy", "frustrated"}
+            else 0.25
+            if dominant == "sad"
+            else 0.1
+            if dominant == "tired"
+            else 0.2
+        )
+        valence = 0.5 if dominant == "happy" else -0.4 if dominant in {"sad", "frustrated"} else 0.0
+        tension = 0.7 if dominant == "frustrated" else 0.25
+        return arousal, valence, tension
+
     def _update_face(self, data: dict) -> None:
+        """Fuse a perception frame into the smoothed user affect state.
+
+        Every field is updated with an exponential moving average (EMA) against the
+        previous value, so perception jitter is damped into legible, stable motion.
+        ``_face_alpha`` is the smoothing constant for gaze/attention; ``_affect_alpha``
+        smooths the slower valence/arousal/tension mood axes. Gaze is "toward_user"
+        only when a face is detected and roughly centered, and attention ramps with it.
+        """
         a = self._face_alpha
         max_yaw = self._max_yaw
         max_pitch = self._max_pitch
@@ -99,23 +139,20 @@ class AffectRuntime:
         conf = max(conf, float(data.get("emotion_confidence", 0.0)))
         self.user.emotion_confidence = ema(self.user.emotion_confidence, conf, a)
         self.user.dominant_expression = self.expression_latch.update(dominant, conf, int(data.get("timestamp_ms", self._now())))
-        expression_arousal = (
-            0.65
-            if dominant in {"happy", "frustrated"}
-            else 0.25
-            if dominant == "sad"
-            else 0.1
-            if dominant == "tired"
-            else 0.2
-        )
-        valence_target = 0.5 if dominant == "happy" else -0.4 if dominant in {"sad", "frustrated"} else 0.0
-        tension_target = 0.7 if dominant == "frustrated" else 0.25
+        # Ease the mood axes toward the targets implied by the dominant expression.
+        expression_arousal, valence_target, tension_target = self._expression_affect_targets(dominant)
         self.user.valence = ema(self.user.valence, valence_target, aff)
         self.user.tension = ema(self.user.tension, tension_target, aff)
         self.user.arousal = ema(self.user.arousal, expression_arousal, aff)
         self.user.last_updated_ms = int(data.get("timestamp_ms", self._now()))
 
     def _update_audio(self, data: dict) -> None:
+        """Fold a VAD frame into the user's speech/arousal state and turn timing.
+
+        Speech energy and rate are EMA-smoothed into a vocal-arousal estimate. When
+        the user starts/stops speaking we advance the conversation turn state and track
+        silence so the policy can hand the floor back to the assistant after a gap.
+        """
         a = self._audio_alpha
         aff = self._affect_alpha
         speaking = bool(data.get("speaking"))
@@ -140,6 +177,22 @@ class AffectRuntime:
         self.user.last_updated_ms = now
 
     def tick(self, timestamp_ms: int | None = None) -> AvatarBehaviorState:
+        """Advance the affect model one frame and return the avatar behavior.
+
+        The tick is the heart of the runtime. It (1) accrues per-turn timing using the
+        delta since the last tick, (2) recomputes the live interruption risk, then
+        (3) selects a behavior branch from the conversation turn state and policy mode:
+
+        * ``assistant_speaking`` -> present the speaking behavior (lip-sync on).
+        * user currently speaking  -> attentive listening behavior (nod past a silence gap).
+        * ``assistant_thinking``   -> a mirrored or reflected thinking pose.
+        * otherwise                -> an idle pose, mirroring the user's affect when the
+          face is present or a soft-forward gaze when no one is detected.
+
+        The returned ``AvatarBehaviorState`` is drawn from an object pool and filled in
+        place; the previously returned object is released back to the pool *after* the
+        swap, so a caller holding the prior reference is never mutated underneath it.
+        """
         now = timestamp_ms or self._now()
         dt = max(0, now - self._last_tick_ms)
         self._last_tick_ms = now

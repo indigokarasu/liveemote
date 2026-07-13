@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+import logging
 import time
 
 from hermes_avatar.affect.policy import AffectRuntime
@@ -13,11 +14,13 @@ from hermes_avatar.demo.meeting_join import MeetingJoinService
 from hermes_avatar.protocol.agent_bridge import AgentBridge
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
-from hermes_avatar.voice.base import VoiceStyle
+from hermes_avatar.voice.base import VoiceBackend, VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
 from prometheus_client import Counter, Histogram
+
+logger = logging.getLogger(__name__)
 
 # Prometheus metrics for orchestrator operations
 AFFECT_TICKS = Counter(
@@ -130,7 +133,7 @@ class DemoOrchestrator:
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
 
-    def _voice_backend(self, backend: str):
+    def _voice_backend(self, backend: str) -> VoiceBackend:
         normalized = (backend or "none").lower().replace("_", "-")
         if normalized in {"none", "off", "disabled", "silent", "no-tts"}:
             return NoopVoiceAdapter()
@@ -328,11 +331,13 @@ class DemoOrchestrator:
         return self.status()
 
     def join_meeting(self, meeting_url: str, display_name: str | None = None) -> dict:
+        logger.info("meeting join requested", extra={"audit": {"event": "meeting.join", "url": meeting_url}})
         meeting = self.meeting.join(meeting_url, display_name)
         MEETING_JOINS.inc()
         return {**self.status(), "meeting": meeting}
 
     def leave_meeting(self) -> dict:
+        logger.info("meeting leave requested", extra={"audit": {"event": "meeting.leave"}})
         meeting = self.meeting.leave()
         MEETING_LEAVES.inc()
         return {**self.status(), "meeting": meeting}
@@ -406,4 +411,16 @@ class DemoOrchestrator:
         # The _last_tick_ms and _last_speaking_ms are reset to 0 in _new_runtime, but we might want to preserve the last tick time?
         # For simplicity, we'll reset them. The affect runtime will continue from the current time.
 
+        logger.info(
+            "orchestrator config reloaded",
+            extra={
+                "audit": {
+                    "event": "orchestrator.config_reloaded",
+                    "config_changed": config_changed,
+                    "voice_changed": voice_changed,
+                    "renderer_changed": renderer_changed,
+                    "agent_changed": agent_changed,
+                }
+            },
+        )
         return self.status()

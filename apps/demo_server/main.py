@@ -54,4 +54,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    from hermes_avatar.util import configure_logging
+
+    configure_logging()
     uvicorn.run(create_app(args), host=args.host, port=args.port)

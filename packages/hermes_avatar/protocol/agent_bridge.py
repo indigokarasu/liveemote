@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 import json
+import logging
 
 import httpx
 import websockets
 
 from hermes_avatar.affect.state import UserAffectState
+
+logger = logging.getLogger(__name__)
 
 OFFLINE_MODES = {"none", "off", "offline", "disabled", "no_llm", "no-llm"}
 FAKE_MODES = {"fake", "mock", "local"}
@@ -59,6 +62,10 @@ class AgentBridge:
             return await self._external(user_text, affect_state)
         if self.mode in EXTERNAL_MODES and not self.url:
             self.last_error = "external agent mode selected without an agent URL"
+            logger.warning(
+                "external agent mode selected without an agent URL; running offline",
+                extra={"audit": {"event": "agent.no_url", "mode": self.mode}},
+            )
             return AgentResponse(text="", tags={}, source="offline")
 
         from hermes_avatar.demo.fake_hermes import generate_response
@@ -86,6 +93,10 @@ class AgentBridge:
                     data = response.json()
         except Exception as exc:
             self.last_error = str(exc)
+            logger.error(
+                "external agent request failed; falling back to offline",
+                extra={"audit": {"event": "agent.request_failed", "error": str(exc)}},
+            )
             return AgentResponse(text="", tags={}, source="offline")
         self.last_error = None
         return normalize_agent_response(data, source=self.harness)
