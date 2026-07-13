@@ -77,6 +77,35 @@ class VoiceConfig(BaseModel):
     device: str = "cpu"
     cache_dir: str = "cache/voice"
 
+class FaceSwapConfig(BaseModel):
+    """Configuration for the local face-swap backend (FaceFusion or Deep-Live-Cam).
+
+    Overridable via ``FACESWAP__*`` environment variables, mirroring the
+    existing ``AFFECT__*`` nested-prefix pattern (e.g. ``FACESWAP__DEVICE=cuda``).
+    The backend is optional; when it is absent or models are missing the
+    renderer degrades gracefully and reports honest capabilities.
+    """
+
+    enabled: bool = False
+    backend: str = "auto"  # auto | facefusion | deeplivecam
+    vendor_dir: str = "vendor/Deep-Live-Cam"
+    facefusion_dir: str = "vendor/facefusion"
+    device: str = "cpu"  # cpu | cuda
+    source_image: str | None = None
+    models_dir: str | None = None
+    process_timeout: float = 30.0
+    heartbeat_interval: float = 5.0
+    watermark: str = "Synthetic avatar output - consent required for real identities"
+    extra_args: list[str] = Field(default_factory=list)
+    launch_command: list[str] = Field(default_factory=list)
+
+    @field_validator("process_timeout", "heartbeat_interval")
+    @classmethod
+    def check_positive_interval(cls, v):
+        if v <= 0:
+            raise ValueError("interval must be greater than 0")
+        return v
+
 class AppConfig(BaseModel):
     affect: AffectConfig = Field(default_factory=AffectConfig)
     gaze: GazeConfig = Field(default_factory=GazeConfig)
@@ -84,6 +113,7 @@ class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     renderer: RendererConfig = Field(default_factory=RendererConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    faceswap: FaceSwapConfig = Field(default_factory=FaceSwapConfig)
     hardware_profile: dict[str, Any] | None = None
     debug: bool = False
 
