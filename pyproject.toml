@@ -22,3 +22,6 @@ include = ["hermes_avatar*", "apps*"]
 pythonpath = ["packages", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "performance: performance or benchmark tests (not run in the default CI suite)",
+]
