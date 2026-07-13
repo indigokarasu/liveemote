@@ -95,12 +95,24 @@ class CharacterIndex:
         variant: str | None = None,
         tags: set[str] | None = None,
     ) -> list[EmoteAsset]:
+        # Cache results: CharacterIndex is treated as immutable once built, so a
+        # given (state, variant, tags) query always returns the same list. This
+        # avoids re-scanning emotes and rebuilding a tag set on every lookup.
+        key = (state, variant, frozenset(tags) if tags else None)
+        cache = self.__dict__.get("_emote_cache")
+        if cache is None:
+            cache = self._emote_cache = {}
+        if key in cache:
+            return cache[key]
         matches = [emote for emote in self.emotes if emote.state == state]
         if variant is not None:
             matches = [emote for emote in matches if emote.variant == variant]
         if tags:
-            matches = [emote for emote in matches if tags.issubset(set(emote.tags))]
-        return sorted(matches, key=lambda emote: (-emote.priority, emote.id))
+            tag_set = frozenset(tags)
+            matches = [emote for emote in matches if tag_set.issubset(emote.tags)]
+        result = sorted(matches, key=lambda emote: (-emote.priority, emote.id))
+        cache[key] = result
+        return result
 
     def find_emote(
         self,
@@ -113,10 +125,20 @@ class CharacterIndex:
     def find_style(self, style_id: str | None) -> VisualStyle | None:
         if style_id is None:
             return None
-        return next((style for style in self.styles if style.id == style_id), None)
+        cache = self.__dict__.setdefault("_style_cache", {})
+        if style_id in cache:
+            return cache[style_id]
+        result = next((style for style in self.styles if style.id == style_id), None)
+        cache[style_id] = result
+        return result
 
     def find_background(self, background_id: str | None) -> BackgroundSpec | None:
         if background_id is None:
             return None
-        return next((bg for bg in self.backgrounds if bg.id == background_id), None)
+        cache = self.__dict__.setdefault("_background_cache", {})
+        if background_id in cache:
+            return cache[background_id]
+        result = next((bg for bg in self.backgrounds if bg.id == background_id), None)
+        cache[background_id] = result
+        return result
 

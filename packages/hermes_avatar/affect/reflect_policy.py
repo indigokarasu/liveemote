@@ -2,6 +2,9 @@ from __future__ import annotations
 from .smoothing import clamp
 from .state import UserAffectState
 
+# Module-level constant: avoid rebuilding this set on every per-frame call.
+_THREAT_EXPRESSIONS = frozenset({"angry", "frustrated"})
+
 
 def reflected_affect(user: UserAffectState) -> tuple[str, float]:
     """Return a validating, regulated complement to the user's affect.
@@ -19,7 +22,7 @@ def reflected_affect(user: UserAffectState) -> tuple[str, float]:
         return "warm_acknowledging", clamp(
             0.28 + (0.10 * attention) + (0.04 * arousal), 0.28, 0.44
         )
-    if user.dominant_expression in {"angry", "frustrated"} or tension > 0.55:
+    if user.dominant_expression in _THREAT_EXPRESSIONS or tension > 0.55:
         return "validating_grounded", clamp(
             0.20 + (0.08 * tension) - (0.03 * arousal), 0.18, 0.30
         )
