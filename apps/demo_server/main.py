@@ -9,7 +9,6 @@ from .routes import build_router, REQUEST_COUNT, REQUEST_LATENCY
 from .websocket_api import websocket_endpoint
 from hermes_avatar.demo.demo_orchestrator import DemoOrchestrator
 
-
 def create_app(args=None) -> FastAPI:
     app = FastAPI(title="Hermes Live Avatar Demo")
     
