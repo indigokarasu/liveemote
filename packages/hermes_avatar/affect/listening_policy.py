@@ -8,6 +8,14 @@ def listening_behavior(
     emote_id: str | None,
     out: AvatarBehaviorState | None = None,
 ) -> AvatarBehaviorState:
+    """Build the avatar behavior while the user is talking (avatar listening turn).
+
+    The avatar stays attentive and gaze-locked on the user. A subtle "nod" affect is
+    layered in once the user has paused (``silence_ms > 350``), a lightweight
+    back-channeling cue that the avatar is still tracking. Intensity scales with the
+    user's speech energy, clamped to a calm [0.25, 0.65] band so listening never reads
+    as agitated. If ``out`` is provided it is filled in place (pooled hot path).
+    """
     nod = conversation.silence_ms > 350
     affect = "attentive_soft" if not nod else "attentive_nod"
     intensity = max(0.25, min(0.65, user.speech_energy))

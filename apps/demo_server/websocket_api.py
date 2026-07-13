@@ -1,7 +1,7 @@
 from __future__ import annotations
 from fastapi import WebSocket
 
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     app = ws.app
     await ws.send_json(app.state.orchestrator.status())

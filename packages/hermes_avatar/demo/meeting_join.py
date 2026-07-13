@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 MEET_CODE_RE = re.compile(r"^/[a-z]{3}-[a-z]{4}-[a-z]{3}/?$")
 
@@ -53,6 +56,7 @@ class MeetingJoinService:
         return self.session.to_dict()
 
     def join(self, url: str, display_name: str | None = None) -> dict:
+        logger.info("meeting join started", extra={"audit": {"event": "meeting_join.start", "url": url}})
         clean_url = normalize_google_meet_url(url)
         if display_name:
             self.session.display_name = display_name.strip() or self.session.display_name
@@ -95,6 +99,7 @@ class MeetingJoinService:
         return self.status()
 
     def leave(self) -> dict:
+        logger.info("meeting leave requested", extra={"audit": {"event": "meeting.leave"}})
         renderer_result = {}
         leave_meeting = getattr(self.renderer, "leave_meeting", None)
         if callable(leave_meeting):

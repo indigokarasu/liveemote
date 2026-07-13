@@ -23,3 +23,7 @@ class VoiceBackend(ABC):
     @abstractmethod
     def synthesize(self, text: str, voice_style: VoiceStyle, reference_audio: str | None = None) -> SynthesizedSpeech:
         raise NotImplementedError
+
+    def capability_status(self) -> dict:
+        """Best-effort status surface. Subclasses override with backend specifics."""
+        return {"backend": "unknown"}

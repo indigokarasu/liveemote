@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import subprocess
 import time
@@ -12,6 +13,8 @@ import httpx
 from .base import Renderer
 from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
+
+logger = logging.getLogger(__name__)
 
 
 class RendererUnavailableError(RuntimeError):
@@ -60,18 +63,23 @@ class LiveTalkingAdapter(Renderer):
         self.request_timeout: float = float(timeout) if timeout else 1.5
         self.connect_timeout: float = float(connect_timeout) if connect_timeout else 1.0
 
-        # Circuit breaker state
+        # Circuit breaker state. The breaker trips to "open" after
+        # ``cb_failure_threshold`` consecutive failures and refuses work for
+        # ``cb_timeout`` seconds (then probes once in "half-open") so a dead
+        # renderer is not hammered and the demo degrades gracefully.
         self.cb_failure_count = 0
         self.cb_last_failure_time: float | None = None
-        self.cb_state = "closed"  # closed, open, half-open
-        self.cb_failure_threshold = 5
-        self.cb_timeout = 60  # seconds
+        self.cb_state = "closed"  # closed (healthy) -> open (tripped) -> half-open (probing)
+        self.cb_failure_threshold = 5  # consecutive failures before tripping
+        self.cb_timeout = 60  # seconds the breaker stays open before probing
 
-        # Retry configuration
+        # Retry configuration: exponential backoff (base_delay * 2**attempt)
+        # capped at max_delay, with +/- jitter_factor proportional dithering to
+        # avoid synchronized retry storms across many concurrent requests.
         self.max_retries = 3
-        self.base_delay = 0.5  # seconds
-        self.max_delay = 4.0  # seconds
-        self.jitter_factor = 0.1  # 10% jitter
+        self.base_delay = 0.5  # seconds, first retry delay
+        self.max_delay = 4.0  # seconds, ceiling on retry delay
+        self.jitter_factor = 0.1  # +/- 10% randomization on each delay
 
         self.active_style: VisualStyle | None = None
         self.active_background: BackgroundSpec | None = None
@@ -170,6 +178,10 @@ class LiveTalkingAdapter(Renderer):
         if self.cb_state == "open":
             if self.cb_last_failure_time and (time.time() - self.cb_last_failure_time) > self.cb_timeout:
                 self.cb_state = "half-open"
+                logger.info(
+                    "renderer circuit breaker probing (half-open)",
+                    extra={"audit": {"event": "renderer.cb_half_open", "endpoint": endpoint}},
+                )
             else:
                 # Circuit is open and timeout not elapsed, fail fast
                 if optional:
@@ -202,6 +214,10 @@ class LiveTalkingAdapter(Renderer):
                         self.cb_state = "closed"
                         self.cb_failure_count = 0
                         self.cb_last_failure_time = None
+                        logger.info(
+                            "renderer circuit breaker recovered (closed)",
+                            extra={"audit": {"event": "renderer.cb_recovered", "endpoint": endpoint}},
+                        )
                     return {"ok": True, **data}
             except Exception as exc:
                 elapsed = int((time.perf_counter() - started) * 1000)
@@ -233,6 +249,17 @@ class LiveTalkingAdapter(Renderer):
         self.cb_last_failure_time = time.time()
         if self.cb_failure_count >= self.cb_failure_threshold:
             self.cb_state = "open"
+            logger.warning(
+                "renderer circuit breaker tripped (open)",
+                extra={
+                    "audit": {
+                        "event": "renderer.cb_open",
+                        "endpoint": endpoint,
+                        "failure_count": self.cb_failure_count,
+                        "error": str(last_exception),
+                    }
+                },
+            )
         
         if optional:
             return {"ok": False, "offline": True, "endpoint": endpoint, "error": str(last_exception)}

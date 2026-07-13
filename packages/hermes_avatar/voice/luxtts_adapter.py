@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import shlex
@@ -12,6 +13,8 @@ from pathlib import Path
 
 from .base import SynthesizedSpeech, VoiceBackend, VoiceStyle
 from .voice_cache import VoiceCache
+
+logger = logging.getLogger(__name__)
 
 
 class LuxTTSAdapter(VoiceBackend):
@@ -65,6 +68,10 @@ class LuxTTSAdapter(VoiceBackend):
                     self.last_error = None
                 except Exception as exc:  # command failure should not break local demo audio
                     self.last_error = str(exc)
+                    logger.warning(
+                        "luxtts vendor command failed; using local parametric fallback",
+                        extra={"audit": {"event": "luxtts.vendor_fallback", "error": str(exc)}},
+                    )
                     self._write_parametric_voice(path, text, voice_style)
             else:
                 self._write_parametric_voice(path, text, voice_style)

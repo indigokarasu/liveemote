@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from hermes_avatar.character.asset_index import (
     VisualStyle,
 )
 from .base import Renderer
+
+logger = logging.getLogger(__name__)
 
 
 class DeepLiveCamAdapter(Renderer):
@@ -93,6 +96,10 @@ class DeepLiveCamAdapter(Renderer):
         if not self.enabled:
             self.replacement_active = False
             self.last_error = "Deep-Live-Cam renderer is selected but not enabled."
+            logger.warning(
+                "deeplivecam replacement not activated",
+                extra={"audit": {"event": "deeplivecam.disabled", "reason": self.last_error}},
+            )
             return
         if self.character_index is None:
             self.replacement_active = False

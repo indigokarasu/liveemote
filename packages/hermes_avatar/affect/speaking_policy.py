@@ -8,6 +8,14 @@ def speaking_behavior(
     emote_id: str | None,
     out: AvatarBehaviorState | None = None,
 ) -> AvatarBehaviorState:
+    """Build the avatar behavior while it is the one talking (assistant turn).
+
+    Affect is taken from the agent's ``hermes_tags`` when present (so the chosen
+    voice/emotion styling drives the face), falling back to a grounded/focused read
+    derived from the user's tension. Lip-sync is enabled and gaze stays toward the
+    user. If ``out`` is provided it is filled in place (pooled hot path); otherwise a
+    fresh ``AvatarBehaviorState`` is allocated.
+    """
     tags = hermes_tags or {}
     voice = tags.get("voice", {}) if isinstance(tags.get("voice", {}), dict) else {}
     affect = tags.get("affect") or ("grounded" if user.tension > 0.5 else "focused")

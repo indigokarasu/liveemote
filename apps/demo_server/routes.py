@@ -123,15 +123,15 @@ def build_router(static_dir: str) -> APIRouter:
     router = APIRouter(dependencies=[Depends(trace_dependency)])
 
     @router.get("/")
-    def index():
+    def index() -> FileResponse:
         return FileResponse(f"{static_dir}/index.html")
 
     @router.get("/metrics")
-    async def metrics():
+    async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @router.get("/api/audio")
-    def audio(path: str, request: Request):
+    def audio(path: str, request: Request) -> Response:
         audio_path = Path(path).resolve()
         roots = [Path(request.app.state.orchestrator.config.voice.cache_dir).resolve()]
         if audio_path.suffix.lower() != ".wav":
@@ -143,18 +143,18 @@ def build_router(static_dir: str) -> APIRouter:
         return FileResponse(str(audio_path), media_type="audio/wav")
 
     @router.get("/api/status")
-    def status(request: Request):
+    def status(request: Request) -> dict:
         # Update active characters gauge
         orchestrator = request.app.state.orchestrator
         ACTIVE_CHARACTERS.set(len(orchestrator.character_roots))
         return orchestrator.status()
 
     @router.post("/api/event")
-    def event(payload: EventRequest, request: Request):
+    def event(payload: EventRequest, request: Request) -> dict:
         return request.app.state.orchestrator.apply_event(payload.event)
 
     @router.post("/api/speak")
-    async def speak(payload: SpeakRequest, request: Request):
+    async def speak(payload: SpeakRequest, request: Request) -> dict:
         orchestrator = request.app.state.orchestrator
         start_time = time.time()
         try:
@@ -167,11 +167,11 @@ def build_router(static_dir: str) -> APIRouter:
             raise
 
     @router.post("/api/mode")
-    def mode(payload: ModeRequest, request: Request):
+    def mode(payload: ModeRequest, request: Request) -> dict:
         return request.app.state.orchestrator.set_policy_mode(payload.mode)
 
     @router.post("/api/character")
-    def character(payload: CharacterRequest, request: Request):
+    def character(payload: CharacterRequest, request: Request) -> dict:
         try:
             result = request.app.state.orchestrator.set_character(payload.character_id)
             CHARACTER_CHANGES.inc()
@@ -180,7 +180,7 @@ def build_router(static_dir: str) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/api/style")
-    def style(payload: StyleRequest, request: Request):
+    def style(payload: StyleRequest, request: Request) -> dict:
         try:
             result = request.app.state.orchestrator.set_style(payload.style_id, payload.sync_background)
             STYLE_CHANGES.inc()
@@ -189,7 +189,7 @@ def build_router(static_dir: str) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/api/background")
-    def background(payload: BackgroundRequest, request: Request):
+    def background(payload: BackgroundRequest, request: Request) -> dict:
         try:
             result = request.app.state.orchestrator.set_background(payload.background_id, payload.sync_background)
             BACKGROUND_CHANGES.inc()
@@ -198,7 +198,7 @@ def build_router(static_dir: str) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/api/workflow")
-    def workflow(payload: WorkflowRequest, request: Request):
+    def workflow(payload: WorkflowRequest, request: Request) -> dict:
         try:
             result = request.app.state.orchestrator.apply_workflow(payload.workflow)
             WORKFLOW_EXECUTIONS.labels(workflow=payload.workflow).inc()
@@ -207,11 +207,11 @@ def build_router(static_dir: str) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/api/trigger/{state}")
-    def trigger(state: str, request: Request):
+    def trigger(state: str, request: Request) -> dict:
         return request.app.state.orchestrator.trigger(state)
 
     @router.post("/api/character/select")
-    def select_character(payload: CharacterSelectRequest, request: Request):
+    def select_character(payload: CharacterSelectRequest, request: Request) -> dict:
         orchestrator = request.app.state.orchestrator
         selected = build_asset_index(payload.character_path)
         orchestrator.character_roots[selected.character_id] = Path(payload.character_path)
@@ -219,24 +219,24 @@ def build_router(static_dir: str) -> APIRouter:
         return orchestrator.set_character(selected.character_id)
 
     @router.post("/api/meeting/join")
-    def join_meeting(payload: MeetingJoinRequest, request: Request):
+    def join_meeting(payload: MeetingJoinRequest, request: Request) -> dict:
         try:
             return request.app.state.orchestrator.join_meeting(payload.meeting_url, payload.display_name)
         except MeetingJoinError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/api/meeting/leave")
-    def leave_meeting(request: Request):
+    def leave_meeting(request: Request) -> dict:
         return request.app.state.orchestrator.leave_meeting()
 
     @router.post("/api/config/reload")
-    def reload_config(request: Request):
+    def reload_config(request: Request) -> dict:
         orchestrator = request.app.state.orchestrator
         return orchestrator.reload_config()
 
     @router.get("/health")
     @router.get("/api/health")
-    def health(request: Request):
+    def health(request: Request) -> dict:
         """Fast, never-raising aggregate health endpoint.
 
         Returns {status, components} where status is one of ok|degraded|error and
@@ -324,7 +324,7 @@ def build_router(static_dir: str) -> APIRouter:
         return {"status": overall, "components": components}
 
     @router.get("/debug/affect")
-    def debug_affect(request: Request):
+    def debug_affect(request: Request) -> dict:
         """Expose the live internal affect state for development/visualization.
 
         Guarded by the ``debug`` config flag so it is NEVER served in
