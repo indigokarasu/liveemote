@@ -339,7 +339,7 @@ class DemoOrchestrator:
 
     def reload_config(self) -> dict:
         """Reload configuration from defaults.yaml and environment variables, and update dependent components."""
-        new_config = reload_config()
+        new_config = reload_config(self.config)
         # Track what changed to know what to recreate
         config_changed = False
         voice_changed = False

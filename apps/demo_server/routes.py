@@ -1,5 +1,5 @@
 from __future__ import annotations
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pathlib import Path
 from pydantic import BaseModel
@@ -8,6 +8,11 @@ from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.demo.meeting_join import MeetingJoinError
 import time
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+import logging
+
+from hermes_avatar.observability.tracing import ensure_trace_id, get_trace_id
+
+logger = logging.getLogger("hermes_avatar.demo.routes")
 
 # Prometheus metrics
 REQUEST_COUNT = Counter(
@@ -94,7 +99,28 @@ class ConfigReloadRequest(BaseModel):
     pass
 
 def build_router(static_dir: str) -> APIRouter:
-    router = APIRouter()
+    async def trace_dependency(request: Request, response: Response) -> str:
+        # Establish a per-request trace id once, so every downstream log line
+        # (and the affect runtime tick that runs within this context) shares it.
+        # Declaring ``response`` lets us stamp the id on the outgoing response
+        # for end-to-end correlation without router-level middleware (which
+        # APIRouter does not support).
+        trace_id = ensure_trace_id()
+        response.headers["X-Trace-Id"] = trace_id
+        logger.info(
+            "request received",
+            extra={
+                "trace_id": trace_id,
+                "audit": {
+                    "event": "http.request",
+                    "method": request.method,
+                    "path": request.url.path,
+                },
+            },
+        )
+        return trace_id
+
+    router = APIRouter(dependencies=[Depends(trace_dependency)])
 
     @router.get("/")
     def index():
@@ -296,5 +322,28 @@ def build_router(static_dir: str) -> APIRouter:
         mark(components["livetalking_reachability"]["status"])
 
         return {"status": overall, "components": components}
+
+    @router.get("/debug/affect")
+    def debug_affect(request: Request):
+        """Expose the live internal affect state for development/visualization.
+
+        Guarded by the ``debug`` config flag so it is NEVER served in
+        production by default. Returns the user / conversation / avatar state,
+        the active policy mode, the last agent tags, and a bounded history of
+        recent ticks (each correlated with the trace id that caused it).
+        """
+        orchestrator = request.app.state.orchestrator
+        if not getattr(orchestrator.config, "debug", False):
+            raise HTTPException(status_code=404, detail="Debug endpoint disabled")
+        runtime = orchestrator.runtime
+        return {
+            "trace_id": get_trace_id(),
+            "user": runtime.user.to_dict(),
+            "conversation": runtime.conversation.to_dict(),
+            "avatar": runtime.avatar.to_dict(),
+            "mode": runtime.mode,
+            "hermes_tags": runtime.hermes_tags,
+            "recent_history": runtime.history,
+        }
 
     return router
