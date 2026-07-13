@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pathlib import Path
 from pydantic import BaseModel
-from typing import Any
+from typing import Any, Callable
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.demo.meeting_join import MeetingJoinError
 import time
@@ -304,6 +304,33 @@ def build_router(static_dir: str) -> APIRouter:
         except Exception as exc:
             components["character_catalog"] = {"status": "degraded", "detail": {"error": str(exc)}}
         mark(components["character_catalog"]["status"])
+
+        # --- face-swap subsystem (best-effort; degrades instead of 500-ing) ---
+        try:
+            renderer = orchestrator.renderer
+            health_fn: Callable[[], dict[str, Any]] | None = getattr(renderer, "health", None)
+            if callable(health_fn):
+                fs_health: dict[str, Any] = health_fn()
+                fs_detail = fs_health.get("detail", fs_health)
+                fs_status = fs_health.get("status", "ok")
+                # A face-swap adapter that is enabled but degraded (no backend /
+                # models / GPU) is reported as degraded, not error.
+                if fs_status == "error":
+                    fs_status = "error"
+                elif fs_status == "degraded":
+                    fs_status = "degraded"
+                else:
+                    fs_status = "ok"
+            else:
+                fs_status = "ok"
+                fs_detail = {"note": "renderer exposes no health() surface"}
+            components["faceswap"] = {
+                "status": fs_status,
+                "detail": fs_detail,
+            }
+        except Exception as exc:
+            components["faceswap"] = {"status": "degraded", "detail": {"error": str(exc)}}
+        mark(components["faceswap"]["status"])
 
         # --- external LiveTalking reachability (best-effort, reuses renderer probe) ---
         try:
