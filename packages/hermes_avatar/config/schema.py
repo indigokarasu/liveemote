@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from pathlib import Path
 from typing import Any
 import yaml
@@ -52,6 +53,60 @@ class AppConfig(BaseModel):
     renderer: RendererConfig = Field(default_factory=RendererConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
 
+
+def _parse_env_value(value: str) -> Any:
+    """Parse an env var string into a typed Python value.
+
+    Supports: bool (true/false/1/0/yes/no), int, float, and string fallback.
+    """
+    lowered = value.lower().strip()
+    if lowered in ("true", "1", "yes"):
+        return True
+    if lowered in ("false", "0", "no"):
+        return False
+    # int
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    # float
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _load_env_config() -> dict[str, Any]:
+    """Read env vars with ``__`` as nested key separator.
+
+    Convention: uppercase env var names use ``__`` to separate nesting levels.
+    Each part is lowercased when building the nested dict.
+
+    Examples:
+        ``AFFECT__UPDATE_HZ=60``     -> ``{"affect": {"update_hz": 60}}``
+        ``GAZE__ENABLED=false``      -> ``{"gaze": {"enabled": False}}``
+        ``VOICE__DEVICE=cuda``       -> ``{"voice": {"device": "cuda"}}``
+    """
+    result: dict[str, Any] = {}
+    sep = "__"  # double underscore = nesting separator
+    for key, raw in os.environ.items():
+        if sep not in key:
+            continue
+        parts = key.split(sep)
+        parsed = _parse_env_value(raw)
+        target = result
+        for i, part in enumerate(parts):
+            key_lower = part.lower()
+            if i == len(parts) - 1:
+                target[key_lower] = parsed
+            else:
+                if key_lower not in target:
+                    target[key_lower] = {}
+                target = target[key_lower]
+    return result
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
@@ -66,4 +121,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     data = yaml.safe_load(defaults.read_text()) or {}
     if path:
         data = deep_merge(data, yaml.safe_load(Path(path).read_text()) or {})
+    # Environment variables with __ separator override YAML values
+    env_data = _load_env_config()
+    data = deep_merge(data, env_data)
     return AppConfig.model_validate(data)
