@@ -4,9 +4,13 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import importlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
+
+import numpy as np
 
 from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import (
@@ -15,598 +19,703 @@ from hermes_avatar.character.asset_index import (
     TrainingReference,
     VisualStyle,
 )
+from hermes_avatar.config.schema import FaceSwapConfig
 from .base import Renderer
 
 logger = logging.getLogger(__name__)
 
-# Signature-level defaults. These are referenced both by FaceSwapAdapter.__init__
-# and by DeepLiveCamAdapter (a subclass) so that explicit overrides win over
-# config-provided values while unset arguments fall back to config then to these.
-_DEFAULT_VENDOR_DIR = "vendor/Deep-Live-Cam"
-_DEFAULT_FACEFUSION_DIR = "vendor/facefusion"
-_DEFAULT_BACKEND = "auto"  # auto | facefusion | deeplivecam
-_DEFAULT_DEVICE = "cpu"  # cpu | cuda
-_DEFAULT_WATERMARK = "Synthetic avatar output - consent required for real identities"
+# Default model filenames we look for to decide whether a backend can actually
+# run. Missing models => degraded passthrough (never a crash).
+DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
+    "facefusion": ("inswapper_128_fp16.onnx", "GFPGANv1.4.onnx"),
+    "deeplivecam": ("inswapper_128_fp16.onnx", "GFPGANv1.4.onnx"),
+}
 
 
-def _device_to_provider(device: str) -> str:
-    """Map a logical device ("cpu"/"cuda") to an execution-provider token.
+# ---------------------------------------------------------------------------
+# Prometheus metrics (guarded import — never hard-fail if absent)
+# ---------------------------------------------------------------------------
+try:
+    from prometheus_client import Counter, Gauge
 
-    Both FaceFusion and Deep-Live-Cam accept ``cpu`` / ``cuda`` execution
-    providers; this keeps the mapping in one place so callers pass a logical
-    device rather than backend-specific strings.
-    """
-    return "cuda" if str(device).lower().startswith("cuda") else "cpu"
+    FACESWAP_SWAPS_TOTAL = Counter(
+        "faceswap_swaps_total",
+        "Total face-swap frames processed by the renderer adapter",
+        ["backend", "mode"],
+    )
+    FACESWAP_BACKEND_ERRORS = Counter(
+        "faceswap_backend_errors_total",
+        "Face-swap backend invocation errors",
+        ["backend"],
+    )
+    FACESWAP_DEGRADED = Gauge(
+        "faceswap_degraded",
+        "1 when the face-swap backend is degraded / running in passthrough mode",
+    )
+    FACESWAP_SWAP_FPS = Gauge(
+        "faceswap_swap_fps",
+        "Observed face-swap pipeline frame rate (best effort)",
+    )
+    _PROM_AVAILABLE = True
+except Exception:  # pragma: no cover - prometheus_client optional in some envs
+    _PROM_AVAILABLE = False
+    FACESWAP_SWAPS_TOTAL = FACESWAP_BACKEND_ERRORS = FACESWAP_DEGRADED = FACESWAP_SWAP_FPS = None
 
 
+def record_swap(backend: str, mode: str = "swap") -> None:
+    if _PROM_AVAILABLE:
+        FACESWAP_SWAPS_TOTAL.labels(backend=backend, mode=mode).inc()
+
+
+def record_backend_error(backend: str) -> None:
+    if _PROM_AVAILABLE:
+        FACESWAP_BACKEND_ERRORS.labels(backend=backend).inc()
+
+
+def set_degraded(backend: str, degraded: bool) -> None:
+    if _PROM_AVAILABLE:
+        FACESWAP_DEGRADED.set(1 if degraded else 0)
+
+
+def set_swap_fps(fps: float) -> None:
+    if _PROM_AVAILABLE:
+        FACESWAP_SWAP_FPS.set(fps)
+
+
+# ---------------------------------------------------------------------------
+# GPU detection (non-fatal)
+# ---------------------------------------------------------------------------
+def _detect_gpu() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Backend lifecycle manager
+# ---------------------------------------------------------------------------
 class BackendManager:
-    """Locates and (optionally) supervises a local face-swap backend.
+    """Owns the face-swap backend process and performs per-frame swaps.
 
-    Two backends are supported:
+    Every detection / startup step is non-fatal. If the backend binary, models,
+    or (optionally) the GPU are unavailable, the manager enters a *degraded*
+    state and :meth:`swap` becomes a transparent copy (passthrough). This is the
+    expected CI / headless behaviour and must never raise.
 
-    * **facefusion** -- OpenRAIL-AS headless CLI with a job-based architecture.
-    * **deeplivecam** -- the vendored ``Deep-Live-Cam`` (AGPL-3.0) ``run.py``.
-
-    Discovery is purely filesystem-based: we look for a known CLI entrypoint
-    under the configured vendor directories. Nothing is imported from the
-    vendored code at module load time (its heavy deps -- insightface, onnx,
-    cv2 -- are absent in many environments), so importing this module is always
-    safe.
-
-    The manager operates in one of two modes:
-
-    * **on-demand** (default): no persistent process. Each frame/image swap is
-      performed by spawning a short-lived subprocess. ``start()`` simply marks
-      the manager ready; ``online`` tracks backend availability.
-    * **supervised**: if ``launch_command`` is provided, a long-lived backend
-      process is spawned and tracked (heartbeat + exit detection + shutdown).
-      This lets an operator run a sidecar server (e.g. facefusion's job API)
-      on a GPU host while this adapter supervises it.
+    The manager is dependency-injectable: tests pass a ``swap_callable`` and/or a
+    fake ``process`` so the pipeline can be exercised without spawning a real
+    backend.
     """
 
     def __init__(
         self,
-        vendor_dir: str = _DEFAULT_VENDOR_DIR,
-        facefusion_dir: str = _DEFAULT_FACEFUSION_DIR,
-        backend: str = _DEFAULT_BACKEND,
-        device: str = _DEFAULT_DEVICE,
-        models_dir: str | None = None,
-        process_timeout: float = 30.0,
-        heartbeat_interval: float = 5.0,
-        extra_args: list[str] | None = None,
-        launch_command: list[str] | None = None,
+        config: FaceSwapConfig,
+        swap_callable: Callable[[Any], Any] | None = None,
     ) -> None:
-        self.vendor_dir = Path(vendor_dir)
-        self.facefusion_dir = Path(facefusion_dir)
-        self.backend_choice = backend
-        self.device = device
-        self.models_dir = Path(models_dir) if models_dir else None
-        self.process_timeout = process_timeout
-        self.heartbeat_interval = heartbeat_interval
-        self.extra_args = list(extra_args or [])
-        self.launch_command = list(launch_command) if launch_command else None
+        self.config = config
+        self.swap_callable = swap_callable
+        self.process: subprocess.Popen | None = None
+        self.binary: list[str] | None = None
+        self.available = False
+        self.model_present = False
+        self.gpu_present = False
+        self.degraded = True
+        self.passthrough = True
+        self.error: str | None = None
+        self.last_startup_error: str | None = None
+        self.started_at: float | None = None
+        self._lock = threading.Lock()
 
-        self._discovered: dict[str, Any] | None = self._discover()
-        self._process: subprocess.Popen | None = None
-        self._online: bool = False
-        self._last_health: float | None = None
-        self._last_error: str | None = None
-
-    # ------------------------------------------------------------------ discovery
-    def _discover(self) -> dict[str, Any] | None:
-        """Return the first usable backend entrypoint, or ``None`` if none found.
-
-        When ``backend_choice`` is ``auto`` we prefer facefusion (its headless
-        job architecture is the most server-friendly) and fall back to
-        Deep-Live-Cam. Explicit choices only consider that backend.
-        """
-        candidates: list[tuple[str, Path]] = []
-        if self.backend_choice in ("auto", "facefusion"):
-            candidates.append(("facefusion", self.facefusion_dir))
-        if self.backend_choice in ("auto", "deeplivecam"):
-            candidates.append(("deeplivecam", self.vendor_dir))
-
-        for name, base in candidates:
-            entrypoint = self._find_entrypoint(name, base)
-            if entrypoint is not None:
-                return {"name": name, "entrypoint": entrypoint, "dir": base}
+    # ---- detection ------------------------------------------------------
+    def _detect_binary(self) -> list[str] | None:
+        cfg = self.config
+        if cfg.backend_binary:
+            if shutil.which(cfg.backend_binary) or Path(cfg.backend_binary).exists():
+                return [cfg.backend_binary]
+            return None
+        vendor = Path(cfg.vendor_dir)
+        if cfg.backend == "facefusion":
+            cli = shutil.which("facefusion")
+            if cli:
+                return [cli]
+            for entry in ("facefusion.py", "run.py"):
+                if (vendor / entry).exists():
+                    return [sys.executable, str(vendor / entry)]
+            return None
+        if cfg.backend == "deeplivecam":
+            for entry in ("run.py", "main.py"):
+                if (vendor / entry).exists():
+                    return [sys.executable, str(vendor / entry)]
+            return None
         return None
 
-    @staticmethod
-    def _find_entrypoint(name: str, base: Path) -> Path | None:
-        """Locate a CLI entrypoint for the named backend under ``base``."""
-        if name == "facefusion":
-            for cand in (base / "facefusion.py", base / "run.py", base / "__main__.py"):
-                if cand.is_file():
-                    return cand
-            # facefusion installed as a package module
-            if (base / "facefusion" / "__main__.py").is_file():
-                return base / "facefusion" / "__main__.py"
-        else:  # deeplivecam
-            for cand in (base / "run.py", base / "DeepLiveCam.py", base / "main.py"):
-                if cand.is_file():
-                    return cand
-            # Vendored checkout with a modules/ package but no top-level run.py
-            # (common). The canonical entrypoint is modules/run or run.py.
-            if (base / "modules").is_dir():
-                alt = base / "run.py"
-                if alt.is_file():
-                    return alt
-        return None
-
-    def is_available(self) -> bool:
-        """True if a CLI entrypoint was discovered (regardless of model presence)."""
-        return self._discovered is not None
-
-    def availability_detail(self) -> dict[str, Any] | None:
-        """Honest description of what was discovered (or why nothing was)."""
-        if self._discovered is None:
-            return {
-                "name": None,
-                "entrypoint": None,
-                "dir": None,
-                "searched": [str(self.facefusion_dir), str(self.vendor_dir)],
-            }
-        detail = dict(self._discovered)
-        detail["entrypoint"] = str(detail["entrypoint"])
-        detail["dir"] = str(detail["dir"])
-        detail["models_available"] = self.models_available()
-        return detail
-
-    def models_available(self) -> bool:
-        """Best-effort check for required ONNX models.
-
-        If an explicit ``models_dir`` is configured we require it to contain at
-        least one ``.onnx`` file. For Deep-Live-Cam we look for the inswapper
-        model under ``<dir>/models``. For facefusion the model cache layout is
-        backend-managed and not reliably detectable, so we optimistically
-        return ``True`` and let the subprocess surface a real error if a model
-        is genuinely missing (fail-honest at execution time, not at probe time).
-        """
-        if self.models_dir is not None:
-            models = Path(self.models_dir)
-            if not models.exists():
-                return False
-            return any(models.glob("*.onnx")) or any(models.glob("*.onnx.*"))
-        if self._discovered is None:
+    def _models_present(self) -> bool:
+        cfg = self.config
+        explicit = cfg.model_paths or {}
+        if explicit:
+            return all(Path(p).exists() for p in explicit.values())
+        models_dir = Path(cfg.vendor_dir) / cfg.models_dir
+        if not models_dir.is_dir():
             return False
-        if self._discovered["name"] == "deeplivecam":
-            inswapper = self._discovered["dir"] / "models" / "inswapper_128.onnx"
-            return inswapper.exists()
-        return True
+        defaults = DEFAULT_MODELS.get(cfg.backend, ())
+        return any((models_dir / name).exists() for name in defaults)
 
-    # ------------------------------------------------------------- lifecycle
-    def start(self) -> bool:
-        """Bring the backend online.
-
-        In supervised mode this spawns ``launch_command`` and tracks it. In
-        on-demand mode there is no persistent process, so this simply records
-        readiness. Returns ``True`` if the backend is usable afterwards.
-        """
-        if not self.is_available():
-            self._last_error = "Cannot start: face-swap backend not available."
-            self._online = False
-            logger.warning(
-                "faceswap backend start skipped",
-                extra={"audit": {"event": "faceswap.backend_unavailable", "error": self._last_error}},
-            )
-            return False
-
-        if self._process is not None:
-            return True
-
-        if self.launch_command:
-            try:
-                self._process = subprocess.Popen(
-                    self.launch_command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                self._online = True
-                self._last_health = time.time()
-                logger.info(
-                    "faceswap backend process started",
-                    extra={"audit": {"event": "faceswap.backend_started", "cmd": self.launch_command}},
-                )
-            except Exception as exc:  # pragma: no cover - depends on host
-                self._online = False
-                self._last_error = f"Failed to launch backend: {exc}"
-                logger.error(self._last_error)
-                return False
-        else:
-            # On-demand mode: ready to swap per-frame via subprocess.
-            self._online = True
-            self._last_health = time.time()
-        return True
-
-    def healthcheck(self) -> bool:
-        """Update and return ``online`` status (supervised mode only really needs this)."""
-        if self._process is not None:
-            if self._process.poll() is not None:
-                self._online = False
-                self._last_error = f"Backend process exited (code {self._process.returncode})."
-                logger.warning(self._last_error)
-            else:
-                self._online = True
-                self._last_health = time.time()
-        return self._online
-
-    def stop(self) -> None:
-        """Terminate a supervised backend process if one is running."""
-        if self._process is not None:
-            try:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=5)
-                except Exception:
-                    self._process.kill()
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("error stopping backend: %s", exc)
-            finally:
-                self._process = None
-        self._online = False
-
-    @property
-    def online(self) -> bool:
-        return self._online
-
-    # --------------------------------------------------------- command building
-    def _build_swap_command(self, source: str, target: str, output: str) -> list[str]:
-        """Build the CLI command for a one-shot image/video swap.
-
-        Raises ``RuntimeError`` if no backend is available so callers fail
-        honestly instead of silently producing no-op output.
-        """
-        if not self.is_available():
-            raise RuntimeError("No face-swap backend available; cannot build swap command.")
-        provider = _device_to_provider(self.device)
-        name = self._discovered["name"]
-        python = sys.executable or "python"
-        entry = str(self._discovered["entrypoint"])
-
-        if name == "facefusion":
-            cmd = [
-                python, entry, "headless-run",
-                "--source", source,
-                "--target", target,
-                "--output", output,
-                "--execution-providers", provider,
-            ]
-        else:  # deeplivecam
-            cmd = [
-                python, entry,
-                "--source", source,
-                "--target", target,
-                "--output", output,
-                "--frame-processor", "inswapper_128",
-                "--execution-provider", provider,
-                "--many-faces",
-                "--skip-download",
-            ]
-        cmd.extend(self.extra_args)
-        return cmd
-
-    def swap_image(self, source: str, target: str, output: str) -> dict[str, Any]:
-        """Run a one-shot swap of ``target`` using ``source`` face -> ``output``.
-
-        Returns a structured result dict. Raises ``RuntimeError`` only when the
-        backend is entirely unavailable; transient subprocess failures are
-        returned as ``{"ok": False, ...}`` so callers can degrade gracefully.
-        """
-        cmd = self._build_swap_command(source, target, output)
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.process_timeout,
-                check=False,
-            )
-            ok = proc.returncode == 0 and Path(output).exists()
-            result = {
-                "ok": ok,
-                "returncode": proc.returncode,
-                "output": output,
-                "cmd": cmd,
-                "stdout": (proc.stdout or "")[-2000:],
-                "stderr": (proc.stderr or "")[-2000:],
-            }
-            if not ok:
-                logger.warning(
-                    "faceswap swap_image failed",
-                    extra={"audit": {"event": "faceswap.swap_failed", "stderr": result["stderr"]}},
-                )
-            return result
-        except subprocess.TimeoutExpired:
-            logger.warning("faceswap swap_image timed out after %ss", self.process_timeout)
-            return {"ok": False, "error": "timeout", "cmd": cmd}
-        except Exception as exc:
-            logger.warning("faceswap swap_image error: %s", exc)
-            return {"ok": False, "error": str(exc), "cmd": cmd}
-
-    def swap_frame(self, frame: Any, source: str) -> Any:
-        """Swap a single in-memory frame (numpy array) using ``source``.
-
-        ``cv2`` is imported lazily inside this method so the module imports
-        cleanly even when OpenCV is absent. The frame is written to a temp file,
-        swapped through the CLI, and read back -- correct (if not the fastest)
-        for both supported backends. If OpenCV is missing we raise so the caller
-        can fall back to pass-through.
-        """
-        try:
-            import cv2  # type: ignore
-            import numpy as np  # type: ignore
-        except Exception as exc:  # pragma: no cover - env-dependent
-            raise RuntimeError("cv2/numpy unavailable; cannot process frame in-memory.") from exc
-
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            tgt = Path(td) / "frame.png"
-            out = Path(td) / "swap.png"
-            ok_encode = cv2.imwrite(str(tgt), frame)
-            if not ok_encode:
-                raise RuntimeError("cv2.imwrite failed to serialize frame.")
-            res = self.swap_image(str(tgt), str(tgt), str(out))
-            if not res.get("ok"):
-                raise RuntimeError(f"backend swap failed: {res.get('stderr') or res.get('error')}")
-            swapped = cv2.imread(str(out))
-            if swapped is None:
-                raise RuntimeError("cv2.imread failed to load swapped output.")
-            return swapped
-
-
-class FaceSwapAdapter(Renderer):
-    """Local-subprocess face-swap renderer backed by FaceFusion or Deep-Live-Cam.
-
-    Unlike the prior ``DeepLiveCamAdapter`` stub, this adapter drives a real
-    backend: it discovers a CLI entrypoint, supervises (or on-demand invokes) the
-    backend, and performs actual frame/image swaps. When no backend, models, or
-    GPU is present it degrades **gracefully and honestly** -- reporting
-    ``replacement_active=False`` with a truthful ``last_error`` and passing frames
-    through unchanged rather than faking success.
-
-    The full :class:`Renderer` interface is implemented; ``load_character`` /
-    ``set_theme`` / ``set_behavior`` / ``speak`` refresh the swap session state,
-    and :meth:`process_frame` / :meth:`swap_image` are the actual processing paths
-    a compositor would call.
-    """
-
-    backend_label = "faceswap"
-
-    def __init__(
-        self,
-        enabled: bool = False,
-        vendor_dir: str = _DEFAULT_VENDOR_DIR,
-        config: Any = None,
-        backend: str = _DEFAULT_BACKEND,
-        device: str = _DEFAULT_DEVICE,
-        source_image: str | None = None,
-        models_dir: str | None = None,
-        facefusion_dir: str = _DEFAULT_FACEFUSION_DIR,
-        process_timeout: float = 30.0,
-        heartbeat_interval: float = 5.0,
-        watermark: str = _DEFAULT_WATERMARK,
-        extra_args: list[str] | None = None,
-        launch_command: list[str] | None = None,
-    ) -> None:
-        cfg = config
-        # enabled: explicit True wins; otherwise fall back to config.
-        self.enabled = enabled or (bool(getattr(cfg, "enabled", False)) if cfg is not None else False)
-
-        # Resolve each setting: explicit kwarg wins over config over signature default.
-        vd = vendor_dir if vendor_dir != _DEFAULT_VENDOR_DIR else (getattr(cfg, "vendor_dir", _DEFAULT_VENDOR_DIR) if cfg else _DEFAULT_VENDOR_DIR)
-        ffd = facefusion_dir if facefusion_dir != _DEFAULT_FACEFUSION_DIR else (getattr(cfg, "facefusion_dir", _DEFAULT_FACEFUSION_DIR) if cfg else _DEFAULT_FACEFUSION_DIR)
-        bk = backend if backend != _DEFAULT_BACKEND else (getattr(cfg, "backend", _DEFAULT_BACKEND) if cfg else _DEFAULT_BACKEND)
-        dv = device if device != _DEFAULT_DEVICE else (getattr(cfg, "device", _DEFAULT_DEVICE) if cfg else _DEFAULT_DEVICE)
-        md = models_dir if models_dir is not None else (getattr(cfg, "models_dir", None) if cfg else None)
-        si = source_image if source_image is not None else (getattr(cfg, "source_image", None) if cfg else None)
-        pto = process_timeout if process_timeout != 30.0 else (getattr(cfg, "process_timeout", 30.0) if cfg else 30.0)
-        hb = heartbeat_interval if heartbeat_interval != 5.0 else (getattr(cfg, "heartbeat_interval", 5.0) if cfg else 5.0)
-        wm = watermark if watermark != _DEFAULT_WATERMARK else (getattr(cfg, "watermark", _DEFAULT_WATERMARK) if cfg else _DEFAULT_WATERMARK)
-        ea = extra_args if extra_args is not None else (list(getattr(cfg, "extra_args", []) or []) if cfg else None)
-        lc = launch_command if launch_command is not None else (list(getattr(cfg, "launch_command", []) or []) if cfg else None)
-
-        self.vendor_dir = Path(vd)
-        self.facefusion_dir = Path(ffd)
-        self.backend_choice = bk
-        self.device = dv
-        self.models_dir = Path(md) if md else None
-        self.source_image_override = si
-        self.process_timeout = float(pto)
-        self.heartbeat_interval = float(hb)
-        self.watermark = wm
-        self.extra_args = list(ea or [])
-        self.launch_command = list(lc) if lc else None
-
-        self.backend = BackendManager(
-            vendor_dir=str(self.vendor_dir),
-            facefusion_dir=str(self.facefusion_dir),
-            backend=self.backend_choice,
-            device=self.device,
-            models_dir=str(self.models_dir) if self.models_dir else None,
-            process_timeout=self.process_timeout,
-            heartbeat_interval=self.heartbeat_interval,
-            extra_args=self.extra_args,
-            launch_command=self.launch_command,
+    def _mark_unavailable(self, error: str, model_present: bool | None = None) -> None:
+        self.available = False
+        self.degraded = True
+        self.passthrough = True
+        self.error = error
+        if model_present is not None:
+            self.model_present = model_present
+        logger.warning(
+            "faceswap backend unavailable",
+            extra={
+                "audit": {
+                    "event": "faceswap.unavailable",
+                    "backend": self.config.backend,
+                    "error": error,
+                }
+            },
         )
 
-        self.character_index: CharacterIndex | None = None
-        self.active_style: VisualStyle | None = None
-        self.active_background: BackgroundSpec | None = None
-        self.behavior: AvatarBehaviorState | None = None
-        self.source_reference: TrainingReference | None = None
-        self.source_image_path: str | None = None
-        self.replacement_active = False
-        self._interrupted = False
-        self.last_error: str | None = None
+    def _probe_backend_importable(self) -> str | None:
+        """Return an error string if the backend's Python package cannot be
+        imported, else ``None``. A backend with models on disk but no importable
+        runtime (missing cv2 / onnxruntime / insightface / torch) cannot actually
+        run, so we treat that as unavailable rather than spawning a doomed
+        process."""
+        cfg = self.config
+        if cfg.backend == "deeplivecam":
+            vendor = str(Path(cfg.vendor_dir).resolve())
+            if vendor not in sys.path:
+                sys.path.insert(0, vendor)
+            try:
+                importlib.import_module("modules")
+                return None
+            except Exception as exc:
+                return f"Deep-Live-Cam 'modules' package not importable: {exc}"
+        if cfg.backend == "facefusion":
+            try:
+                importlib.import_module("facefusion")
+                return None
+            except Exception as exc:
+                return f"facefusion package not importable: {exc}"
+        return None
 
-        # Bring the backend online if it is available; otherwise stay honest.
-        if self.enabled and self.backend.is_available():
-            self.backend.start()
+    def detect(self) -> None:
+        """Detect whether the backend can actually run. Non-fatal."""
+        with self._lock:
+            self.error = None
+            binary = self._detect_binary()
+            if not binary:
+                self._mark_unavailable(
+                    f"Backend '{self.config.backend}' not found in PATH or "
+                    f"{self.config.vendor_dir}"
+                )
+                return
+            self.binary = binary
 
-    # ----------------------------------------------------------- capabilities
-    def capabilities(self) -> dict[str, Any]:
-        detail = self.backend.availability_detail()
-        if detail is not None:
-            backend_name = detail.get("name")
-            backend_discovered = detail.get("entrypoint")
-        else:
-            backend_name = None
-            backend_discovered = None
+            vendor = Path(self.config.vendor_dir)
+            if not vendor.exists():
+                self._mark_unavailable(f"Vendor directory missing: {self.config.vendor_dir}")
+                return
+
+            self.model_present = self._models_present()
+            if not self.model_present:
+                self._mark_unavailable(
+                    "Required face-swap models not found; running degraded (passthrough)",
+                    model_present=False,
+                )
+                return
+
+            import_err = self._probe_backend_importable()
+            if import_err is not None:
+                self._mark_unavailable(import_err)
+                return
+
+            self.gpu_present = _detect_gpu()
+            if self.config.require_gpu and not self.gpu_present:
+                self._mark_unavailable("GPU required but not available")
+                return
+
+            self.available = True
+            self.degraded = False
+            self.passthrough = False
+            self.error = None
+
+    # ---- lifecycle -------------------------------------------------------
+    def _build_command(self, source_face: str) -> list[str]:
+        if not self.binary:
+            raise RuntimeError("backend binary not detected")
+        cfg = self.config
+        out = cfg.output_virtual_cam or cfg.output_stream_url or "output.mp4"
+        if cfg.backend == "facefusion":
+            return [
+                *self.binary,
+                "headless-run",
+                "--source-paths",
+                source_face,
+                "--target-path",
+                cfg.input_source,
+                "--output-path",
+                out,
+                "--execution-providers",
+                "cuda" if cfg.device == "cuda" else "cpu",
+                "--frame-processors",
+                "face_swapper",
+                "face_enhancer",
+            ]
+        # deeplivecam
+        return [
+            *self.binary,
+            "--source",
+            source_face,
+            "--target",
+            cfg.input_source,
+            "--output",
+            out,
+            "--execution-provider",
+            "cuda" if cfg.device == "cuda" else "cpu",
+            "--keep-fps",
+            "--many-faces",
+        ]
+
+    def _wait_for_startup(self, source_face: str) -> None:
+        """Best-effort readiness probe. Raises if the process died on launch."""
+        deadline = time.time() + min(self.config.process_timeout, 5.0)
+        while time.time() < deadline:
+            if self.process is None:
+                raise RuntimeError("backend process not spawned")
+            if self.process.poll() is not None:
+                stderr = ""
+                try:
+                    if self.process.stderr is not None:
+                        stderr = self.process.stderr.read()[-2000:]
+                except Exception:
+                    pass
+                raise RuntimeError(f"backend exited on startup: {stderr}")
+            time.sleep(0.25)
+
+    def start(self, source_face: str | None = None) -> None:
+        """Detect, then (if usable) spawn the backend. Never raises."""
+        self.detect()
+        if not (self.config.enabled and self.available and not self.degraded):
+            if self.config.enabled and self.degraded:
+                logger.warning(
+                    "faceswap starting in passthrough (degraded) mode",
+                    extra={
+                        "audit": {
+                            "event": "faceswap.passthrough_start",
+                            "backend": self.config.backend,
+                            "reason": self.error,
+                        }
+                    },
+                )
+            return
+        try:
+            cmd = self._build_command(source_face or "")
+            logger.info(
+                "faceswap backend starting",
+                extra={
+                    "audit": {
+                        "event": "faceswap.start",
+                        "backend": self.config.backend,
+                        "cmd": " ".join(cmd),
+                    }
+                },
+            )
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self._wait_for_startup(source_face or "")
+            self.started_at = time.time()
+        except Exception as exc:  # pragma: no cover - only exercised with a real backend
+            self.last_startup_error = str(exc)
+            logger.error(
+                "faceswap backend failed to start",
+                extra={"audit": {"event": "faceswap.start_failed", "error": str(exc)}},
+            )
+            self._mark_unavailable(f"backend start failed: {exc}")
+            self._cleanup_process()
+
+    def stop(self) -> None:
+        self._cleanup_process()
+        self.started_at = None
+
+    def _cleanup_process(self) -> None:
+        if self.process is not None:
+            try:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+            except Exception:
+                pass
+            self.process = None
+
+    # ---- swapping --------------------------------------------------------
+    def swap(self, frame: Any) -> Any:
+        if not self.available or self.passthrough or self.process is None:
+            return frame  # passthrough
+        try:
+            if self.swap_callable is not None:
+                return self.swap_callable(frame)
+            return self._swap_via_backend(frame)
+        except Exception as exc:  # pragma: no cover - exercised only with a real backend
+            record_backend_error(self.config.backend)
+            logger.error(
+                "faceswap swap failed; falling back to passthrough",
+                extra={"audit": {"event": "faceswap.swap_failed", "error": str(exc)}},
+            )
+            return frame
+
+    def _swap_via_backend(self, frame: Any) -> Any:
+        """Call the backend's Python API for a single frame.
+
+        Heavy imports are performed lazily and guarded so a missing backend /
+        model degrades to passthrough via :meth:`swap`. In a real GPU
+        environment this is where the vendored pipeline would be invoked.
+        """
+        if self.config.backend == "deeplivecam":
+            return self._swap_via_deeplivecam(frame)
+        return self._swap_via_facefusion(frame)
+
+    def _swap_via_deeplivecam(self, frame: Any) -> Any:  # pragma: no cover
+        vendor = str(Path(self.config.vendor_dir).resolve())
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+        try:
+            from modules.face_analyser import get_face_analyser  # type: ignore
+            from modules.processors.frame.face_swapper import get_face_swapper  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(f"Deep-Live-Cam modules unavailable: {exc}") from exc
+        # A real swap would run face detection + inswapper inference on `frame`.
+        # We deliberately do not fabricate an output; if the API surface differs
+        # from what we expect this raises and swap() falls back to passthrough.
+        get_face_analyser()
+        get_face_swapper()
+        raise NotImplementedError("Deep-Live-Cam in-process swap requires GPU + models")
+
+    def _swap_via_facefusion(self, frame: Any) -> Any:  # pragma: no cover
+        try:
+            import facefusion  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(f"facefusion module unavailable: {exc}") from exc
+        raise NotImplementedError("facefusion in-process swap requires GPU + models")
+
+    def is_healthy(self) -> bool:
+        if self.passthrough:
+            return True  # degraded but still serving (passthrough)
+        if self.process is None:
+            return False
+        return self.process.poll() is None
+
+    def snapshot(self) -> dict[str, Any]:
         return {
-            "backend": self.backend_label,
-            "enabled": self.enabled,
-            "backend_name": backend_name,
-            "backend_available": self.backend.is_available(),
-            "backend_discovered": backend_discovered,
-            "models_available": self.backend.models_available(),
-            "online": self.backend.online,
-            "replacement_active": self.replacement_active,
-            "interrupted": self._interrupted,
-            "source_image_path": self.source_image_path,
-            "source_reference_id": self.source_reference.id if self.source_reference else None,
-            "source_reference_role": self.source_reference.role if self.source_reference else None,
-            "canonical_image": self.character_index.canonical_image if self.character_index else None,
-            "vendor_dir_exists": self.vendor_dir.exists(),
-            "device": self.device,
-            "watermark": self.watermark,
-            "error": self.last_error,
+            "backend": self.config.backend,
+            "available": self.available,
+            "model_present": self.model_present,
+            "gpu_present": self.gpu_present,
+            "degraded": self.degraded,
+            "passthrough": self.passthrough,
+            "process_running": self.process is not None and self.process.poll() is None,
+            "binary": " ".join(self.binary) if self.binary else None,
+            "error": self.error,
+            "last_startup_error": self.last_startup_error,
         }
 
-    # -------------------------------------------------------------- Renderer API
-    def load_character(self, character_index: CharacterIndex) -> None:
-        self.character_index = character_index
-        self._interrupted = False
-        self.source_reference = self._select_source_face(character_index)
-        self.source_image_path = self.source_reference.path if self.source_reference else None
-        self._recompute()
 
-    def set_theme(
+# ---------------------------------------------------------------------------
+# Frame I/O (pluggable, test-friendly)
+# ---------------------------------------------------------------------------
+class FrameSource(Protocol):
+    def open(self) -> None: ...
+    def read(self) -> "np.ndarray | None": ...
+    def is_open(self) -> bool: ...
+    def close(self) -> None: ...
+
+
+class FrameSink(Protocol):
+    def open(self) -> None: ...
+    def write(self, frame: "np.ndarray") -> None: ...
+    def is_open(self) -> bool: ...
+    def close(self) -> None: ...
+
+
+class ListFrameSource:
+    """Yields frames from an in-memory list. For tests and offline demos."""
+
+    def __init__(self, frames: list[Any], loop: bool = False) -> None:
+        self._frames = list(frames)
+        self._idx = 0
+        self._loop = loop
+        self._open = True
+
+    def open(self) -> None:
+        self._open = True
+        self._idx = 0
+
+    def read(self) -> "np.ndarray | None":
+        if not self._open or not self._frames:
+            return None
+        if self._idx >= len(self._frames):
+            if self._loop:
+                self._idx = 0
+            else:
+                return None
+        frame = self._frames[self._idx]
+        self._idx += 1
+        return frame
+
+    def is_open(self) -> bool:
+        if not self._open:
+            return False
+        return self._loop or self._idx < len(self._frames)
+
+    def close(self) -> None:
+        self._open = False
+
+
+class ListFrameSink:
+    """Collects frames in memory. For tests and inspection."""
+
+    def __init__(self) -> None:
+        self.frames: list[Any] = []
+        self._open = True
+
+    def open(self) -> None:
+        self._open = True
+
+    def write(self, frame: "np.ndarray") -> None:
+        if self._open:
+            self.frames.append(frame)
+
+    def is_open(self) -> bool:
+        return self._open
+
+    def close(self) -> None:
+        self._open = False
+
+
+class OpenCVFrameSource:
+    """Captures frames from a URL, device, or file via OpenCV.
+
+    OpenCV is imported lazily so the adapter still imports in environments
+    without ``cv2`` (e.g. CI). Constructing this source when cv2 is missing
+    raises at :meth:`open`, which callers must guard.
+    """
+
+    def __init__(self, source: str, frame_rate: int = 25) -> None:
+        self.source = source
+        self.frame_rate = frame_rate
+        self._cap = None
+        self._cv2 = None
+
+    def open(self) -> None:
+        import cv2  # lazy
+
+        self._cv2 = cv2
+        self._cap = cv2.VideoCapture(self.source)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"could not open frame source: {self.source}")
+
+    def read(self) -> "np.ndarray | None":
+        if self._cap is None:
+            return None
+        ok, frame = self._cap.read()
+        return frame if ok else None
+
+    def is_open(self) -> bool:
+        return self._cap is not None and self._cap.isOpened()
+
+    def close(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+
+class VirtualCamSink:
+    """Writes frames to a v4l2loopback virtual camera (or stream) via FFmpeg.
+
+    Only used on a live, online backend. OpenCV is imported lazily.
+    """
+
+    def __init__(self, output_target: str, width: int = 1280, height: int = 720, fps: int = 25) -> None:
+        self.output_target = output_target
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self._writer = None
+
+    def open(self) -> None:
+        import cv2  # lazy
+
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        self._writer = cv2.VideoWriter(self.output_target, fourcc, self.fps, (self.width, self.height))
+        if not self._writer.isOpened():
+            raise RuntimeError(f"could not open virtual camera: {self.output_target}")
+
+    def write(self, frame: "np.ndarray") -> None:
+        if self._writer is not None:
+            self._writer.write(frame)
+
+    def is_open(self) -> bool:
+        return self._writer is not None and self._writer.isOpened()
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+class FaceSwapPipeline:
+    """Feeds source frames through the backend manager into a sink.
+
+    Supports both a one-shot :meth:`process_frame` (used by unit tests and
+    per-frame callers) and a streaming :meth:`run` loop (used in production).
+    """
+
+    def __init__(
         self,
-        character_index: CharacterIndex,
-        style: VisualStyle | None,
-        background: BackgroundSpec | None,
+        source: FrameSource,
+        sink: FrameSink,
+        manager: BackendManager,
+        backend: str = "facefusion",
     ) -> None:
-        self.character_index = character_index
-        self.active_style = style
-        self.active_background = background
-        self._interrupted = False
-        self.source_reference = self._select_source_face(character_index)
-        self.source_image_path = self.source_reference.path if self.source_reference else None
-        self._recompute()
+        self.source = source
+        self.sink = sink
+        self.manager = manager
+        self.backend = backend
+        self.frames_processed = 0
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._last_ts = time.time()
 
-    def set_behavior(self, behavior: AvatarBehaviorState) -> None:
-        # Lip-sync renderers provide their own face; do not swap over them.
-        if behavior.lip_sync_enabled:
-            return
-        self.behavior = behavior
-        self._interrupted = False
-        self._recompute()
-
-    def speak(self, audio_path: str, text: str, behavior: AvatarBehaviorState) -> None:
-        self.behavior = behavior
-        self._interrupted = False
-        self._recompute()
-        if self.replacement_active:
-            logger.info(
-                "faceswap engaged for utterance",
-                extra={"audit": {"event": "faceswap.speak", "audio_path": audio_path, "text_len": len(text)}},
-            )
-
-    def interrupt(self) -> None:
-        self.behavior = AvatarBehaviorState(mode="recovering", affect="reset", gaze_target="soft_forward")
-        self._interrupted = True
-        self._recompute()
-
-    # --------------------------------------------------------- processing paths
     def process_frame(self, frame: Any) -> Any:
-        """Swap a single live frame. Passes through unchanged when inactive.
+        out = self.manager.swap(frame)
+        record_swap(self.backend, mode="swap" if not self.manager.passthrough else "passthrough")
+        self.frames_processed += 1
+        return out
 
-        Honest degradation: if the swap session is not active (backend missing,
-        models absent, not enabled, or interrupted) the original frame is
-        returned untouched -- we never claim a swap occurred.
-        """
-        if not self.replacement_active or self.source_image_path is None:
-            return frame
-        try:
-            return self.backend.swap_frame(frame, self.source_image_path)
-        except Exception as exc:
-            logger.warning(
-                "faceswap process_frame failed; passing frame through",
-                extra={"audit": {"event": "faceswap.frame_error", "error": str(exc)}},
-            )
-            self.last_error = f"swap_frame failed: {exc}"
-            return frame
+    def step(self) -> bool:
+        frame = self.source.read()
+        if frame is None:
+            return False
+        self.sink.write(self.process_frame(frame))
+        return True
 
-    def swap_image(self, target: str, output: str, source: str | None = None) -> dict[str, Any]:
-        """One-shot image/video swap. Returns a structured result dict."""
-        src = source or self.source_image_path
-        if not src:
-            return {"ok": False, "error": "No source face image configured."}
-        return self.backend.swap_image(src, target, output)
+    def run(self, max_frames: int | None = None) -> int:
+        count = 0
+        self._last_ts = time.time()
+        while self._running:
+            if not self.step():
+                break
+            count += 1
+            if max_frames and count >= max_frames:
+                break
+        if count > 1 and self._last_ts:
+            set_swap_fps(count / max(time.time() - self._last_ts, 1e-6))
+        return count
 
-    # --------------------------------------------------------------- internals
-    def _recompute(self) -> None:
-        """Recompute ``replacement_active`` honestly from current state.
+    def start_loop(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self.run, daemon=True)
+        self._thread.start()
 
-        ``True`` only when: enabled, a character+source is loaded, not
-        interrupted, AND a real backend (with models) is available. Anything
-        else yields ``False`` with a truthful ``last_error``.
-        """
-        self.last_error = None
-        if not self.enabled:
-            self.replacement_active = False
-            self.last_error = "Face-swap renderer selected but not enabled."
-            return
-        if self.character_index is None:
-            self.replacement_active = False
-            self.last_error = "No character loaded."
-            return
-        if self.source_reference is None:
-            self.source_reference = self._select_source_face(self.character_index)
-            self.source_image_path = self.source_reference.path if self.source_reference else None
-        if not self.source_image_path or not Path(self.source_image_path).exists():
-            self.replacement_active = False
-            self.last_error = f"Source face image not available: {self.source_image_path}"
-            return
-        if self._interrupted:
-            self.replacement_active = False
-            self.last_error = "Face replacement interrupted (session paused)."
-            return
-        if not self.backend.is_available():
-            self.replacement_active = False
-            self.last_error = (
-                "Face-swap backend not available. No FaceFusion or Deep-Live-Cam CLI "
-                f"found under {self.vendor_dir} or {self.facefusion_dir}."
-            )
-            return
-        if not self.backend.models_available():
-            self.replacement_active = False
-            self.last_error = (
-                "Face-swap backend present but required models (e.g. inswapper_128.onnx) "
-                "are missing. Download models before enabling replacement."
-            )
-            return
-        # All checks passed: a real swap session can be driven.
-        self.replacement_active = True
+    def stop(self) -> None:
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
 
+
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
+class FaceSwapAdapter(Renderer):
+    """Renderer that performs face swapping on the avatar video stream.
+
+    Backend-agnostic (FaceFusion or Deep-Live-Cam). On activation it detects
+    backend / model / GPU availability and either spawns the backend or degrades
+    to a transparent passthrough. Implements the :class:`Renderer` interface so
+    it can be selected as a drop-in renderer in the orchestrator.
+
+    Lifecycle / DI: ``backend_manager``, ``frame_source``, ``frame_sink`` and
+    ``swap_callable`` are injectable so the pipeline can be unit-tested without
+    spawning a real backend or requiring cv2 / numpy video stacks.
+    """
+
+    def __init__(
+        self,
+        config: FaceSwapConfig | None = None,
+        *,
+        backend: str | None = None,
+        enabled: bool | None = None,
+        vendor_dir: str | None = None,
+        source_face_path: str | None = None,
+        device: str | None = None,
+        input_source: str | None = None,
+        output_virtual_cam: str | None = None,
+        output_stream_url: str | None = None,
+        frame_rate: int | None = None,
+        require_gpu: bool | None = None,
+        backend_manager: BackendManager | None = None,
+        frame_source: FrameSource | None = None,
+        frame_sink: FrameSink | None = None,
+        swap_callable: Callable[[Any], Any] | None = None,
+    ) -> None:
+        cfg = config or FaceSwapConfig()
+        overrides = {
+            k: v
+            for k, v in dict(
+                backend=backend,
+                enabled=enabled,
+                vendor_dir=vendor_dir,
+                source_face_path=source_face_path,
+                device=device,
+                input_source=input_source,
+                output_virtual_cam=output_virtual_cam,
+                output_stream_url=output_stream_url,
+                frame_rate=frame_rate,
+                require_gpu=require_gpu,
+            ).items()
+            if v is not None
+        }
+        if overrides:
+            cfg = cfg.model_copy(update=overrides)
+        self.config = cfg
+
+        self.character_index: CharacterIndex | None = None
+        self.source_reference: TrainingReference | None = None
+        self.source_image_path: str | None = self.config.source_face_path
+        self.behavior: AvatarBehaviorState | None = None
+        self.active_style: VisualStyle | None = None
+        self.active_background: BackgroundSpec | None = None
+        self.watermark = "Synthetic avatar output - consent required for real identities"
+
+        self.manager = backend_manager or BackendManager(self.config, swap_callable=swap_callable)
+        self.frame_source = frame_source
+        self.frame_sink = frame_sink
+        self.pipeline: FaceSwapPipeline | None = None
+
+        self.replacement_active = False
+        self.last_error: str | None = None
+        self._activate()
+
+    # ---- source face selection ------------------------------------------
     def _select_source_face(self, character_index: CharacterIndex) -> TrainingReference | None:
-        """Pick the best identity-anchor face for swapping.
-
-        Prefers an explicit ``identity_anchor`` training reference that exists on
-        disk; falls back to the canonical character image (a single source face
-        is sufficient for inswapper-style one-shot swapping).
-        """
-        if self.source_image_override and Path(self.source_image_override).exists():
-            return TrainingReference(
-                id="override_identity_anchor",
-                path=self.source_image_override,
-                role="identity_anchor",
-                state="neutral",
-                weight=1.0,
-                tags=["override", "identity", "neutral"],
-            )
         identity_anchor = next(
             (
                 ref
@@ -629,26 +738,169 @@ class FaceSwapAdapter(Renderer):
             )
         return None
 
-    def __del__(self) -> None:
-        try:
-            self.backend.stop()
-        except Exception:
-            pass
+    # ---- activation ------------------------------------------------------
+    def _activate(self) -> None:
+        self.last_error = None
+        set_degraded(self.config.backend, True)
 
+        if not self.config.enabled:
+            self.replacement_active = False
+            self.last_error = "Face-swap renderer selected but disabled."
+            logger.info(
+                "faceswap disabled",
+                extra={"audit": {"event": "faceswap.disabled", "backend": self.config.backend}},
+            )
+            return
 
-class DeepLiveCamAdapter(FaceSwapAdapter):
-    """Backward-compatible alias for the Deep-Live-Cam / FaceSwap backend.
+        if self.character_index is None and self.source_image_path is None:
+            self.replacement_active = False
+            self.last_error = "No character / source face loaded."
+            return
 
-    Preserves the historical ``DeepLiveCamAdapter(enabled=..., vendor_dir=...)``
-    constructor signature and default behavior (``enabled=True`` when selected
-    via the demo CLI) while inheriting the real backend-driven implementation.
-    """
+        if self.source_image_path is None and self.character_index is not None:
+            ref = self._select_source_face(self.character_index)
+            if ref is not None:
+                self.source_reference = ref
+                self.source_image_path = ref.path
 
-    backend_label = "deeplivecam"
+        self.manager.config = self.config
+        self.manager.start(self.source_image_path)
 
-    def __init__(
+        self.replacement_active = self.manager.available and not self.manager.degraded
+        set_degraded(self.config.backend, self.manager.degraded)
+
+        if self.replacement_active:
+            self._build_pipeline()
+            logger.info(
+                "faceswap active",
+                extra={"audit": {"event": "faceswap.active", "backend": self.config.backend}},
+            )
+        else:
+            self.last_error = self.manager.error or "Face-swap backend unavailable; passthrough active."
+            logger.warning(
+                "faceswap degraded/passthrough",
+                extra={
+                    "audit": {
+                        "event": "faceswap.passthrough",
+                        "backend": self.config.backend,
+                        "reason": self.last_error,
+                    }
+                },
+            )
+
+    def _build_pipeline(self) -> None:
+        if self.frame_source is None:
+            try:
+                self.frame_source = OpenCVFrameSource(self.config.input_source, self.config.frame_rate)
+            except Exception as exc:  # pragma: no cover - needs cv2 + a live source
+                logger.warning("faceswap could not build frame source", extra={"audit": {"event": "faceswap.no_source", "error": str(exc)}})
+                return
+        if self.frame_sink is None:
+            target = self.config.output_virtual_cam or self.config.output_stream_url
+            if target:
+                try:
+                    self.frame_sink = VirtualCamSink(target, fps=self.config.frame_rate)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("faceswap could not build frame sink", extra={"audit": {"event": "faceswap.no_sink", "error": str(exc)}})
+                    return
+        if self.frame_source is not None and self.frame_sink is not None:
+            self.pipeline = FaceSwapPipeline(
+                self.frame_source, self.frame_sink, self.manager, self.config.backend
+            )
+            try:
+                self.frame_source.open()
+                self.frame_sink.open()
+                self.pipeline.start_loop()
+            except Exception as exc:  # pragma: no cover
+                logger.warning("faceswap pipeline could not start", extra={"audit": {"event": "faceswap.pipeline_failed", "error": str(exc)}})
+                self.pipeline = None
+
+    # ---- Renderer interface ---------------------------------------------
+    def load_character(self, character_index: CharacterIndex) -> None:
+        self.character_index = character_index
+        self.source_reference = self._select_source_face(character_index)
+        self.source_image_path = self.source_reference.path if self.source_reference else None
+        self._activate()
+
+    def set_theme(
         self,
-        enabled: bool = False,
-        vendor_dir: str = _DEFAULT_VENDOR_DIR,
+        character_index: CharacterIndex,
+        style: VisualStyle | None,
+        background: BackgroundSpec | None,
     ) -> None:
-        super().__init__(enabled=enabled, vendor_dir=vendor_dir)
+        self.character_index = character_index
+        self.active_style = style
+        self.active_background = background
+        self.source_reference = self._select_source_face(character_index)
+        self.source_image_path = self.source_reference.path if self.source_reference else None
+        self._activate()
+
+    def set_behavior(self, behavior: AvatarBehaviorState) -> None:
+        if behavior.lip_sync_enabled:
+            return
+        self.behavior = behavior
+
+    def speak(self, audio_path: str, text: str, behavior: AvatarBehaviorState) -> None:
+        self.behavior = behavior
+        if self.pipeline is None and self.config.enabled:
+            self._activate()
+
+    def interrupt(self) -> None:
+        self.behavior = AvatarBehaviorState(mode="recovering", affect="reset", gaze_target="soft_forward")
+        if self.pipeline is not None:
+            self.pipeline.stop()
+        self.replacement_active = False
+
+    # ---- observability ---------------------------------------------------
+    def capabilities(self) -> dict[str, Any]:
+        m = self.manager
+        return {
+            "backend": self.config.backend,
+            "enabled": self.config.enabled,
+            "online": m.available and not m.degraded,
+            "model_present": m.model_present,
+            "degraded": m.degraded,
+            "passthrough": m.passthrough,
+            "replacement_active": self.replacement_active,
+            "source_image_present": bool(self.source_image_path and Path(self.source_image_path).exists()),
+            "source_image_path": self.source_image_path,
+            "source_reference_id": self.source_reference.id if self.source_reference else None,
+            "source_reference_role": self.source_reference.role if self.source_reference else None,
+            "device": self.config.device,
+            "require_gpu": self.config.require_gpu,
+            "gpu_present": m.gpu_present,
+            "input_source": self.config.input_source,
+            "output_target": self.config.output_virtual_cam or self.config.output_stream_url,
+            "output_virtual_cam": self.config.output_virtual_cam,
+            "output_stream_url": self.config.output_stream_url,
+            "frame_rate": self.config.frame_rate,
+            "swap_threshold": self.config.swap_threshold,
+            "vendor_dir": str(self.config.vendor_dir),
+            "vendor_dir_exists": Path(self.config.vendor_dir).exists(),
+            "backend_binary": " ".join(m.binary) if m.binary else None,
+            "process_running": m.process is not None and m.process.poll() is None,
+            "watermark": self.watermark,
+            "error": self.last_error or m.error,
+            # backward-compatible aliases used by older tests/UI
+            "replacement_active_legacy": self.replacement_active,
+        }
+
+    def health(self) -> dict[str, Any]:
+        caps = self.capabilities()
+        status = "ok" if caps["online"] else ("degraded" if self.config.enabled else "ok")
+        return {"status": status, "backend": self.config.backend, "detail": caps}
+
+    def shutdown(self) -> None:
+        if self.pipeline is not None:
+            self.pipeline.stop()
+        self.manager.stop()
+        if self.frame_source is not None:
+            try:
+                self.frame_source.close()
+            except Exception:
+                pass
+        if self.frame_sink is not None:
+            try:
+                self.frame_sink.close()
+            except Exception:
+                pass

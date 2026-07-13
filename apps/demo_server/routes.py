@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pathlib import Path
 from pydantic import BaseModel
-from typing import Any
+from typing import Any, Callable
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.demo.meeting_join import MeetingJoinError
 import time
@@ -305,6 +305,33 @@ def build_router(static_dir: str) -> APIRouter:
             components["character_catalog"] = {"status": "degraded", "detail": {"error": str(exc)}}
         mark(components["character_catalog"]["status"])
 
+        # --- face-swap subsystem (best-effort; degrades instead of 500-ing) ---
+        try:
+            renderer = orchestrator.renderer
+            health_fn: Callable[[], dict[str, Any]] | None = getattr(renderer, "health", None)
+            if callable(health_fn):
+                fs_health: dict[str, Any] = health_fn()
+                fs_detail = fs_health.get("detail", fs_health)
+                fs_status = fs_health.get("status", "ok")
+                # A face-swap adapter that is enabled but degraded (no backend /
+                # models / GPU) is reported as degraded, not error.
+                if fs_status == "error":
+                    fs_status = "error"
+                elif fs_status == "degraded":
+                    fs_status = "degraded"
+                else:
+                    fs_status = "ok"
+            else:
+                fs_status = "ok"
+                fs_detail = {"note": "renderer exposes no health() surface"}
+            components["faceswap"] = {
+                "status": fs_status,
+                "detail": fs_detail,
+            }
+        except Exception as exc:
+            components["faceswap"] = {"status": "degraded", "detail": {"error": str(exc)}}
+        mark(components["faceswap"]["status"])
+
         # --- external LiveTalking reachability (best-effort, reuses renderer probe) ---
         try:
             renderer = orchestrator.renderer
@@ -320,29 +347,6 @@ def build_router(static_dir: str) -> APIRouter:
                 "detail": {"error": str(exc)},
             }
         mark(components["livetalking_reachability"]["status"])
-
-        # --- face-swap backend (if the active renderer is a face-swap adapter) ---
-        try:
-            renderer = orchestrator.renderer
-            renderer_caps = renderer.capabilities() if hasattr(renderer, "capabilities") else {}
-            if renderer_caps.get("backend") in ("faceswap", "deeplivecam"):
-                replacement = bool(renderer_caps.get("replacement_active"))
-                backend_available = bool(renderer_caps.get("backend_available"))
-                models_available = bool(renderer_caps.get("models_available"))
-                components["faceswap_backend"] = {
-                    "status": "ok" if replacement else "degraded",
-                    "detail": {
-                        "backend": renderer_caps.get("backend_name"),
-                        "backend_available": backend_available,
-                        "models_available": models_available,
-                        "replacement_active": replacement,
-                        "enabled": renderer_caps.get("enabled"),
-                        "error": renderer_caps.get("error"),
-                    },
-                }
-                mark("ok" if replacement else "degraded")
-        except Exception as exc:
-            components["faceswap_backend"] = {"status": "degraded", "detail": {"error": str(exc)}}
 
         return {"status": overall, "components": components}
 

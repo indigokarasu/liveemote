@@ -2,50 +2,52 @@ from pathlib import Path
 
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
-from hermes_avatar.renderer.facefusion_adapter import FaceSwapAdapter
 from scripts.create_sample_character import PNG_1X1_RGBA
 
 
-def _build_canonical_only_character(tmp_path: Path):
+def test_deeplivecam_degrades_when_backend_absent(tmp_path):
+    """The canonical-only character resolves a source face, but with no backend
+    binary / models present (the expected CI state) the adapter degrades to a
+    transparent passthrough rather than claiming an active swap."""
     character = tmp_path / "canonical_only"
     canonical_dir = character / "canonical"
     canonical_dir.mkdir(parents=True)
     (canonical_dir / "canonical.png").write_bytes(PNG_1X1_RGBA)
-    return build_asset_index(character)
 
-
-def test_deeplivecam_canonical_only_degrades_gracefully_without_backend(tmp_path):
-    """When no face-swap backend/models are present, the adapter must NOT fake
-    success: it reports an honest ``replacement_active=False`` with a truthful
-    error while still resolving the source face for when a backend is present."""
-    index = _build_canonical_only_character(tmp_path)
-    # Sanity: build_asset_index synthesizes an identity anchor from canonical.png.
-    anchors = [ref for ref in index.training_references if ref.role == "identity_anchor"]
-    assert anchors, "expected an identity_anchor reference from canonical.png"
+    index = build_asset_index(character)
+    assert [ref for ref in index.training_references if ref.role == "expression_reference"] == []
 
     adapter = DeepLiveCamAdapter(enabled=True)
     adapter.load_character(index)
     caps = adapter.capabilities()
 
-    # Honest degradation: no backend/models in this environment.
-    assert caps["replacement_active"] is False
-    assert caps["backend_available"] is False
-    assert caps["models_available"] is False
-    assert "backend" in (caps["error"] or "").lower()
-
-    # Source selection still works so the swap is ready when a backend appears.
+    # Source face is still resolved from the canonical image.
     assert caps["source_reference_role"] == "identity_anchor"
     assert caps["source_reference_id"] == "identity_anchor_001"
     assert Path(caps["source_image_path"]).name == "canonical.png"
+    assert caps["source_image_present"] is True
+    # But the backend runtime package is not importable in CI (no cv2 /
+    # onnxruntime), so the adapter detects this at activation and degrades to a
+    # transparent passthrough rather than spawning a doomed GUI process.
+    assert caps["degraded"] is True
+    assert caps["passthrough"] is True
+    assert caps["online"] is False
+    assert caps["replacement_active"] is False
+    # Models may be present on disk, but the runtime is not usable -> error set.
     assert caps["error"] is not None
 
 
-def test_deeplivecam_backward_compatible_signature_and_subclass():
-    """DeepLiveCamAdapter keeps its historical ``(enabled, vendor_dir)``
-    constructor and is a genuine FaceSwapAdapter subclass."""
-    adapter = DeepLiveCamAdapter(enabled=True, vendor_dir="vendor/Deep-Live-Cam")
-    assert isinstance(adapter, FaceSwapAdapter)
-    assert issubclass(DeepLiveCamAdapter, FaceSwapAdapter)
-    assert adapter.enabled is True
-    assert adapter.vendor_dir == Path("vendor/Deep-Live-Cam")
-    assert adapter.backend_label == "deeplivecam"
+def test_deeplivecam_missing_source_face_reports_absent(tmp_path):
+    """When the character has no resolvable source face, that fact is reported
+    honestly and the adapter does not crash."""
+    character = tmp_path / "no_canonical"
+    character.mkdir(parents=True)
+    index = build_asset_index(character)
+
+    adapter = DeepLiveCamAdapter(enabled=True)
+    adapter.load_character(index)
+    caps = adapter.capabilities()
+
+    assert caps["source_image_present"] is False
+    assert caps["source_image_path"] is None
+    assert caps["degraded"] is True
