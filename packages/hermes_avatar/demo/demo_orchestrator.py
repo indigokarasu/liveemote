@@ -13,6 +13,7 @@ from hermes_avatar.config.schema import AppConfig, load_config, reload_config
 from hermes_avatar.demo.meeting_join import MeetingJoinService
 from hermes_avatar.protocol.agent_bridge import AgentBridge
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
+from hermes_avatar.renderer.facefusion_adapter import FaceSwapAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
 from hermes_avatar.voice.base import VoiceBackend, VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
@@ -125,13 +126,31 @@ class DemoOrchestrator:
         self.agent_harness = agent_harness
         self.agent = AgentBridge(agent_mode, agent_url or self.config.agent.url, agent_harness)
         self.hermes = self.agent  # Backward-compatible alias for older status/UI naming.
-        self.renderer = DeepLiveCamAdapter(enabled=True) if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
+        self.renderer = self._build_renderer(renderer)
         self.renderer.load_character(self.index)
         self._notify_renderer_theme()
         self.voice_backend_name = voice_backend
         self.voice = self._voice_backend(voice_backend)
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
+
+    def _build_renderer(self, renderer: str):
+        """Construct the renderer for the selected backend name.
+
+        ``deeplivecam`` is aliased to the real ``FaceSwapAdapter`` (Deep-Live-Cam
+        is one of its supported backends). ``faceswap`` selects the
+        backend-agnostic adapter driven by ``config.faceswap``. Explicit CLI
+        selection implies ``enabled=True``; the LiveTalking HTTP adapter is used
+        otherwise.
+        """
+        if renderer in ("faceswap", "deeplivecam"):
+            fs_cfg = self.config.faceswap
+            return DeepLiveCamAdapter(
+                enabled=True,
+                vendor_dir=fs_cfg.vendor_dir,
+                config=fs_cfg,
+            )
+        return LiveTalkingAdapter(self.config.renderer.livetalking_url)
 
     def _voice_backend(self, backend: str) -> VoiceBackend:
         normalized = (backend or "none").lower().replace("_", "-")
@@ -378,10 +397,15 @@ class DemoOrchestrator:
         # Recreate renderer if renderer config changed
         if renderer_changed:
             # Determine the type of the current renderer to preserve its properties
-            if isinstance(self.renderer, DeepLiveCamAdapter):
-                # Preserve the enabled state
-                enabled = self.renderer.enabled
-                self.renderer = DeepLiveCamAdapter(enabled=enabled)
+            if isinstance(self.renderer, FaceSwapAdapter):
+                # Preserve the enabled state and config for the face-swap backend.
+                fs_cfg = self.config.faceswap
+                enabled = self.renderer.enabled or isinstance(self.renderer, DeepLiveCamAdapter)
+                self.renderer = DeepLiveCamAdapter(
+                    enabled=enabled,
+                    vendor_dir=fs_cfg.vendor_dir,
+                    config=fs_cfg,
+                )
             else:
                 # For LiveTalkingAdapter, we just create a new one with the URL
                 self.renderer = LiveTalkingAdapter(self.config.renderer.livetalking_url)

@@ -321,6 +321,29 @@ def build_router(static_dir: str) -> APIRouter:
             }
         mark(components["livetalking_reachability"]["status"])
 
+        # --- face-swap backend (if the active renderer is a face-swap adapter) ---
+        try:
+            renderer = orchestrator.renderer
+            renderer_caps = renderer.capabilities() if hasattr(renderer, "capabilities") else {}
+            if renderer_caps.get("backend") in ("faceswap", "deeplivecam"):
+                replacement = bool(renderer_caps.get("replacement_active"))
+                backend_available = bool(renderer_caps.get("backend_available"))
+                models_available = bool(renderer_caps.get("models_available"))
+                components["faceswap_backend"] = {
+                    "status": "ok" if replacement else "degraded",
+                    "detail": {
+                        "backend": renderer_caps.get("backend_name"),
+                        "backend_available": backend_available,
+                        "models_available": models_available,
+                        "replacement_active": replacement,
+                        "enabled": renderer_caps.get("enabled"),
+                        "error": renderer_caps.get("error"),
+                    },
+                }
+                mark("ok" if replacement else "degraded")
+        except Exception as exc:
+            components["faceswap_backend"] = {"status": "degraded", "detail": {"error": str(exc)}}
+
         return {"status": overall, "components": components}
 
     @router.get("/debug/affect")
