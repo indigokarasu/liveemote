@@ -1,13 +1,23 @@
 from __future__ import annotations
 import time
 from hermes_avatar.config.schema import AppConfig, load_config
-from .state import UserAffectState, ConversationState, AvatarBehaviorState
+from .state import (
+    UserAffectState,
+    ConversationState,
+    AvatarBehaviorState,
+    fill_behavior_state,
+    acquire_behavior_state,
+    release_behavior_state,
+)
 from .smoothing import ema, clamp, ExpressionLatch, reaction_delay
 from .listening_policy import listening_behavior
 from .speaking_policy import speaking_behavior
 from .mirror_policy import mirrored_affect
 from .reflect_policy import reflected_affect
 from .interruption_policy import interruption_risk
+
+_AFFECT_NONE = "neutral"
+
 
 class AffectRuntime:
     def __init__(self, config: AppConfig | None = None, emote_lookup=None) -> None:
@@ -21,6 +31,16 @@ class AffectRuntime:
         self.emote_lookup = emote_lookup or (lambda state: None)
         self._last_tick_ms = self._now()
         self._last_speaking_ms = 0
+
+        # Cache frequently-read config scalars so the per-frame hot path avoids
+        # repeated nested attribute lookups (self.config.affect.smoothing.*).
+        self._face_alpha = self.config.affect.smoothing.face_alpha
+        self._audio_alpha = self.config.affect.smoothing.audio_alpha
+        self._affect_alpha = self.config.affect.smoothing.affect_alpha
+        self._max_yaw = self.config.gaze.max_yaw_deg
+        self._max_pitch = self.config.gaze.max_pitch_deg
+        self._mirroring_strength = self.config.behavior.mirroring_strength
+        self._reaction_delay = self.config.affect.reaction_delay_ms
 
     def _now(self) -> int:
         return int(time.time() * 1000)
@@ -51,10 +71,13 @@ class AffectRuntime:
         return "neutral", 0.3
 
     def _update_face(self, data: dict) -> None:
-        a = self.config.affect.smoothing.face_alpha
+        a = self._face_alpha
+        max_yaw = self._max_yaw
+        max_pitch = self._max_pitch
+        aff = self._affect_alpha
         self.user.face_detected = bool(data.get("face_detected"))
-        self.user.head_yaw = clamp(ema(self.user.head_yaw, float(data.get("head_yaw", 0)), a), -self.config.gaze.max_yaw_deg, self.config.gaze.max_yaw_deg)
-        self.user.head_pitch = clamp(ema(self.user.head_pitch, float(data.get("head_pitch", 0)), a), -self.config.gaze.max_pitch_deg, self.config.gaze.max_pitch_deg)
+        self.user.head_yaw = clamp(ema(self.user.head_yaw, float(data.get("head_yaw", 0)), a), -max_yaw, max_yaw)
+        self.user.head_pitch = clamp(ema(self.user.head_pitch, float(data.get("head_pitch", 0)), a), -max_pitch, max_pitch)
         center = data.get("face_center") or (0.5, 0.5)
         centered = abs(center[0] - 0.5) < 0.22 and abs(center[1] - 0.5) < 0.22
         self.user.gaze_direction = "toward_user" if self.user.face_detected and centered else "away"
@@ -74,13 +97,16 @@ class AffectRuntime:
             if dominant == "tired"
             else 0.2
         )
-        self.user.valence = ema(self.user.valence, 0.5 if dominant == "happy" else -0.4 if dominant in {"sad", "frustrated"} else 0.0, self.config.affect.smoothing.affect_alpha)
-        self.user.tension = ema(self.user.tension, 0.7 if dominant == "frustrated" else 0.25, self.config.affect.smoothing.affect_alpha)
-        self.user.arousal = ema(self.user.arousal, expression_arousal, self.config.affect.smoothing.affect_alpha)
+        valence_target = 0.5 if dominant == "happy" else -0.4 if dominant in {"sad", "frustrated"} else 0.0
+        tension_target = 0.7 if dominant == "frustrated" else 0.25
+        self.user.valence = ema(self.user.valence, valence_target, aff)
+        self.user.tension = ema(self.user.tension, tension_target, aff)
+        self.user.arousal = ema(self.user.arousal, expression_arousal, aff)
         self.user.last_updated_ms = int(data.get("timestamp_ms", self._now()))
 
     def _update_audio(self, data: dict) -> None:
-        a = self.config.affect.smoothing.audio_alpha
+        a = self._audio_alpha
+        aff = self._affect_alpha
         speaking = bool(data.get("speaking"))
         self.user.speaking = speaking
         self.user.speech_energy = ema(self.user.speech_energy, float(data.get("energy", 0)), a)
@@ -90,7 +116,7 @@ class AffectRuntime:
             0.0,
             1.0,
         )
-        self.user.arousal = ema(self.user.arousal, vocal_arousal, self.config.affect.smoothing.affect_alpha)
+        self.user.arousal = ema(self.user.arousal, vocal_arousal, aff)
         now = int(data.get("timestamp_ms", self._now()))
         if speaking:
             self._last_speaking_ms = now
@@ -112,18 +138,46 @@ class AffectRuntime:
             self.conversation.assistant_turn_ms += dt
         self.conversation.tension = self.user.tension
         self.conversation.interruption_risk = interruption_risk(self.user, self.conversation)
+
+        # Acquire a pooled AvatarBehaviorState and populate it in place (perf-4).
+        out = acquire_behavior_state()
         if self.conversation.turn_state == "assistant_speaking":
-            self.avatar = speaking_behavior(self.user, self.hermes_tags, self.emote_lookup("speaking_optional"))
-            self.avatar.full_body_pose = "presenting"
+            speaking_behavior(self.user, self.hermes_tags, self.emote_lookup("speaking_optional"), out=out)
+            out.full_body_pose = "presenting"
         elif self.user.speaking:
-            self.avatar = listening_behavior(self.user, self.conversation, self.emote_lookup("listening"))
-            self.avatar.full_body_pose = "attentive_lean"
+            listening_behavior(self.user, self.conversation, self.emote_lookup("listening"), out=out)
+            out.full_body_pose = "attentive_lean"
         elif self.conversation.turn_state == "assistant_thinking":
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="thinking", affect=affect, gaze_target=self.user.gaze_direction, emote_id=self.emote_lookup("thinking"), intensity=intensity, delay_ms=reaction_delay(self.mode, self.config), full_body_pose="thinking_shift")
+            fill_behavior_state(
+                out,
+                mode="thinking",
+                affect=affect,
+                gaze_target=self.user.gaze_direction,
+                emote_id=self.emote_lookup("thinking"),
+                intensity=intensity,
+                delay_ms=reaction_delay(self.mode, self._reaction_delay),
+                full_body_pose="thinking_shift",
+            )
         else:
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="idle", affect=affect, gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward", emote_id=self.emote_lookup("neutral"), intensity=intensity, mirror_strength=self.config.behavior.mirroring_strength if self.mode == "mirror" else 0.0, delay_ms=reaction_delay(self.mode, self.config))
+            fill_behavior_state(
+                out,
+                mode="idle",
+                affect=affect,
+                gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward",
+                emote_id=self.emote_lookup("neutral"),
+                intensity=intensity,
+                mirror_strength=self._mirroring_strength if self.mode == "mirror" else 0.0,
+                delay_ms=reaction_delay(self.mode, self._reaction_delay),
+            )
+
+        # Hand the previous frame's object back to the pool. We release *before*
+        # the next acquire in the following tick, so a caller holding this
+        # returned reference is never mutated underneath.
+        prev = self.avatar
+        self.avatar = out
+        release_behavior_state(prev)
         return self.avatar
 
     def set_mode(self, mode: str) -> None:

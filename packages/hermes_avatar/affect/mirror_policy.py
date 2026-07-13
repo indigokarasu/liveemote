@@ -2,6 +2,9 @@ from __future__ import annotations
 from .smoothing import clamp
 from .state import UserAffectState
 
+# Module-level constants: avoid rebuilding these sets on every per-frame call.
+_THREAT_EXPRESSIONS = frozenset({"angry", "frustrated"})
+
 
 def _social_presence(user: UserAffectState) -> float:
     """Estimate whether mimicry would be legible instead of uncanny."""
@@ -26,7 +29,7 @@ def mirrored_affect(user: UserAffectState) -> tuple[str, float]:
         return "small_delayed_smile", clamp(
             0.18 + (0.18 * presence) + (0.08 * arousal), 0.16, 0.42
         )
-    if user.dominant_expression in {"angry", "frustrated"} or tension > 0.58:
+    if user.dominant_expression in _THREAT_EXPRESSIONS or tension > 0.58:
         return "grounded_concern_soft_brow", clamp(
             0.08 + (0.08 * presence) - (0.05 * tension), 0.06, 0.16
         )
