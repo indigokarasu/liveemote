@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import time
 from hermes_avatar.config.schema import AppConfig, load_config
 from .state import (
@@ -9,6 +10,12 @@ from .state import (
     acquire_behavior_state,
     release_behavior_state,
 )
+from hermes_avatar.observability.tracing import get_trace_id
+
+logger = logging.getLogger(__name__)
+
+# Bounded ring buffer of recent tick records exposed via the debug endpoint.
+HISTORY_LIMIT = 30
 from .smoothing import ema, clamp, ExpressionLatch, reaction_delay
 from .listening_policy import listening_behavior
 from .speaking_policy import speaking_behavior
@@ -31,6 +38,10 @@ class AffectRuntime:
         self.emote_lookup = emote_lookup or (lambda state: None)
         self._last_tick_ms = self._now()
         self._last_speaking_ms = 0
+        # Bounded, most-recent-last history of tick outputs for the
+        # debug/visualization endpoint. Each entry carries the active trace id
+        # so a developer can correlate a tick with the request that caused it.
+        self.history: list[dict] = []
 
         # Cache frequently-read config scalars so the per-frame hot path avoids
         # repeated nested attribute lookups (self.config.affect.smoothing.*).
@@ -178,7 +189,34 @@ class AffectRuntime:
         prev = self.avatar
         self.avatar = out
         release_behavior_state(prev)
+
+        self._record_history(now)
         return self.avatar
+
+    def _record_history(self, ts_ms: int) -> None:
+        """Append a compact, trace-correlated record to the bounded history."""
+        trace_id = get_trace_id()
+        self.history.append({
+            "ts_ms": ts_ms,
+            "trace_id": trace_id,
+            "mode": self.mode,
+            "turn_state": self.conversation.turn_state,
+            "avatar": self.avatar.to_dict(),
+        })
+        if len(self.history) > HISTORY_LIMIT:
+            del self.history[0 : len(self.history) - HISTORY_LIMIT]
+        logger.debug(
+            "affect tick",
+            extra={
+                "trace_id": trace_id,
+                "audit": {
+                    "event": "affect.tick",
+                    "mode": self.mode,
+                    "turn_state": self.conversation.turn_state,
+                    "affect": self.avatar.affect,
+                },
+            },
+        )
 
     def set_mode(self, mode: str) -> None:
         if mode not in {"mirror", "reflect"}:

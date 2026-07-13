@@ -1,9 +1,12 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Any
+import logging
 import os
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger("hermes_avatar.config")
 
 class SmoothingConfig(BaseModel):
     face_alpha: float = 0.35
@@ -82,6 +85,7 @@ class AppConfig(BaseModel):
     renderer: RendererConfig = Field(default_factory=RendererConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     hardware_profile: dict[str, Any] | None = None
+    debug: bool = False
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
@@ -210,12 +214,80 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     # Always expose the detected profile for observability.
     data["hardware_profile"] = profile
 
-    return AppConfig.model_validate(data)
+    config = AppConfig.model_validate(data)
+    _audit_config_loaded(
+        source=str(path) if path else None,
+        env_overrides=sorted(overridden_keys),
+        hardware_profile=profile,
+        hw_aware=hw_aware,
+    )
+    return config
 
-def reload_config() -> AppConfig:
+
+def _changed_leaf_paths(old: dict[str, Any], new: dict[str, Any]) -> set[str]:
+    """Return dotted leaf-paths whose value differs between two config dicts."""
+    old_leaves = _leaf_paths(old)
+    new_leaves = _leaf_paths(new)
+    changed: set[str] = (old_leaves | new_leaves) - (old_leaves & new_leaves)
+    # Compare actual values at shared leaf paths.
+    def _value_at(d: dict[str, Any], dotted: str) -> Any:
+        cur: Any = d
+        for part in dotted.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return "<missing>"
+            cur = cur[part]
+        return cur
+
+    for path in sorted(old_leaves & new_leaves):
+        if _value_at(old, path) != _value_at(new, path):
+            changed.add(path)
+    return changed
+
+
+def _audit_config_loaded(
+    source: str | None,
+    env_overrides: list[str],
+    hardware_profile: dict[str, Any],
+    hw_aware: bool,
+) -> None:
+    """Emit a structured audit log entry when configuration is loaded/reloaded."""
+    logger.info(
+        "configuration loaded",
+        extra={
+            "audit": {
+                "event": "config.loaded",
+                "source": source,
+                "env_overrides": env_overrides,
+                "hardware_profile": hardware_profile,
+                "hw_aware_tuning": hw_aware,
+            }
+        },
+    )
+
+
+def reload_config(previous: "AppConfig | None" = None) -> "AppConfig":
     """Reload configuration from defaults.yaml and environment variables.
 
     The returned AppConfig carries the freshly detected ``hardware_profile`` for
-    observability.
+    observability. When ``previous`` is supplied, an additional audit entry is
+    emitted recording exactly which leaf keys changed versus the prior config.
     """
-    return load_config()
+    new_config = load_config()
+    if previous is not None:
+        changed = _changed_leaf_paths(
+            previous.model_dump(), new_config.model_dump()
+        )
+    else:
+        # No baseline supplied: report the full set of leaf keys as (re)loaded.
+        changed = _leaf_paths(new_config.model_dump())
+    logger.info(
+        "configuration reloaded",
+        extra={
+            "audit": {
+                "event": "config.reloaded",
+                "changed_keys": sorted(changed),
+                "hardware_profile": new_config.hardware_profile,
+            }
+        },
+    )
+    return new_config
