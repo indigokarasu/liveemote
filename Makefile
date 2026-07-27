@@ -37,3 +37,23 @@ test:
 
 push-check:
 	$(PYTHON) scripts/check_push_ready.py
+
+# -----------------------------------------------------------------------------
+# FaceFusion sidecar — built and run in its own container so the main
+# LiveEmote process can stay on Python 3.10. See sidecar/Dockerfile.facefusion.
+# -----------------------------------------------------------------------------
+sidecar-build:
+	docker build -f sidecar/Dockerfile.facefusion -t liveemote/facefusion-sidecar:0.1.0 .
+
+sidecar-up:
+	docker compose up -d liveemote-facefusion
+
+sidecar-down:
+	docker compose stop liveemote-facefusion
+	docker compose rm -f liveemote-facefusion
+
+sidecar-logs:
+	docker compose logs -f liveemote-facefusion
+
+sidecar-shell:
+	docker compose exec liveemote-facefusion bash

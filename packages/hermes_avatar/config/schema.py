@@ -111,6 +111,27 @@ class FaceSwapConfig(BaseModel):
     require_gpu: bool = False
     process_timeout: float = 30.0  # seconds to wait for backend startup acknowledgement
 
+    # ---- Sidecar split ------------------------------------------------------
+    # When ``sidecar_url`` is non-empty AND ``backend == "facefusion"`` the
+    # adapter auto-picks :class:`FaceFusionSidecarDaemon` instead of the
+    # in-process :class:`FaceFusionVendorDaemon`. That isolates FaceFusion's
+    # heavy deps (typing.NotRequired, onnxruntime-gpu, insightface, sklearn)
+    # inside its own container running Python 3.11+. Deep-Live-Cam stays in
+    # the main Python 3.10 process because it doesn't have that constraint.
+    sidecar_url: str | None = None
+    sidecar_api_key: str | None = None  # Bearer shared-secret; empty = no auth
+    sidecar_connect_timeout_s: float = 2.0
+    sidecar_request_timeout_s: float = 8.0
+    sidecar_jpeg_quality: int = 85
+    sidecar_require_auth: bool = False  # when True, sidecar enforces Bearer check
+
+    @field_validator("sidecar_connect_timeout_s", "sidecar_request_timeout_s")
+    @classmethod
+    def check_sidecar_timeout_positive(cls, v):
+        if v <= 0:
+            raise ValueError("sidecar timeout must be greater than 0")
+        return v
+
 class AppConfig(BaseModel):
     affect: AffectConfig = Field(default_factory=AffectConfig)
     gaze: GazeConfig = Field(default_factory=GazeConfig)

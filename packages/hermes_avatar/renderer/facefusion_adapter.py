@@ -969,9 +969,32 @@ class FaceSwapAdapter(Renderer):
         Lazy-imports the concrete daemon module so the lightweight
         ``--renderer web`` path doesn't pay for the FaceFusion/Deep-Live-Cam
         import graph on startup. Never raises — both daemons degrade to
-        passthrough when their vendor dir / models are absent.
+        passthrough when their vendor dir / models / sidecar are absent.
+
+        Auto-picks the HTTP sidecar daemon over the in-process
+        ``FaceFusionVendorDaemon`` whenever ``config.sidecar_url`` is set
+        — that's the recommended production path because it isolates
+        FaceFusion's Python-3.11 + heavy ONNX / insightface deps in a
+        dedicated container. The in-process daemon is still the fallback
+        for ``make setup`` machines that want one process to debug.
         """
         backend = (self.config.backend or "facefusion").lower()
+        sidecar_url = getattr(self.config, "sidecar_url", None) or None
+        if sidecar_url and backend in ("facefusion",):
+            try:
+                from .facefusion_sidecar_daemon import FaceFusionSidecarDaemon
+                return FaceFusionSidecarDaemon(
+                    sidecar_url=sidecar_url,
+                    api_key=getattr(self.config, "sidecar_api_key", None) or None,
+                    source_image_path=self.source_image_path,
+                    connect_timeout_s=getattr(self.config, "sidecar_connect_timeout_s", None),
+                    request_timeout_s=getattr(self.config, "sidecar_request_timeout_s", None),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "sidecar daemon init failed; falling back to in-process FaceFusionVendorDaemon",
+                    extra={"audit": {"event": "faceswap.sidecar_init_failed", "error": str(exc)}},
+                )
         try:
             if backend in ("facefusion",):
                 from .facefusion_daemon import FaceFusionVendorDaemon

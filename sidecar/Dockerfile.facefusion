@@ -1,0 +1,56 @@
+# sidecar/Dockerfile.facefusion
+#
+# FaceFusion is too heavy (typing.NotRequired + onnxruntime-gpu + insightface +
+# sklearn) to live in the main LiveEmote Python 3.10 process. This Dockerfile
+# builds the sidecar container that runs FaceFusion in isolation on
+# Python 3.11+. The main process talks to it over HTTP (sidecar/app.py).
+#
+# Build:    docker build -f sidecar/Dockerfile.facefusion -t liveemote/facefusion-sidecar .
+# Run:      FACESWAP__SIDECAR__VENDOR_DIR=/app/vendor/FaceFusion \
+#           FACESWAP__SIDECAR__API_KEY=<shared-secret> \
+#           docker run --rm -p 8001:8001 liveemote/facefusion-sidecar
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Git is needed to clone FaceFusion. Build-essential + libgomp cover the C
+# extensions insightface / onnxruntime ship with on Linux slim images.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Clone FaceFusion first so the install step can `pip install -e` it.
+# --depth 1 keeps the sidecar image small; full git history isn't needed.
+ARG FACEFUSION_REPO=https://github.com/facefusion/facefusion.git
+ARG FACEFUSION_REF=master
+RUN git clone --depth 1 --branch ${FACEFUSION_REF} ${FACEFUSION_REPO} /app/vendor/FaceFusion
+
+# Sidecar dependency surface (tiny — httpx for the main process's call is NOT
+# installed here, fastapi/uvicorn are). typing_extensions is needed even on
+# 3.11 for the shim to be a no-op identity check.
+COPY sidecar/requirements.txt /app/sidecar/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /app/sidecar/requirements.txt
+
+# FaceFusion's own requirements — install from inside the clone. The
+# `onnxruntime` default is CPU; for GPU hosts override by installing
+# `onnxruntime-gpu` and the matching CUDA wheels in the same layer.
+RUN pip install --no-cache-dir -r /app/vendor/FaceFusion/requirements.txt \
+    && pip install --no-cache-dir typing_extensions
+
+COPY sidecar /app/sidecar
+
+# Default vendor dir matches the clone above. Override at runtime with
+# FACESWAP__SIDECAR__VENDOR_DIR if you're mounting a real NVIDIA GPU host
+# with the local-onnxruntime-gpu build.
+ENV FACESWAP__SIDECAR__VENDOR_DIR=/app/vendor/FaceFusion
+
+EXPOSE 8001
+
+# Single-process uvicorn — no Gunicorn here; sidecar restart is the right knob
+# for fresh state if inference ever wedges.
+CMD ["uvicorn", "sidecar.app:app", "--host", "0.0.0.0", "--port", "8001"]

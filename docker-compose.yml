@@ -1,7 +1,56 @@
+# Two-service Compose for LiveEmote.
+#
+# The split exists because FaceFusion 3.x hard-requires Python 3.11+ and a
+# heavy ONNX / insightface stack. Putting it in the main container bloats
+# the image and forces a 3.11 base. This compose keeps the main process on
+# slim Python 3.10 (Deep-Live-Cam still runs there in-process — no 3.11
+# requirement) and runs FaceFusion in its own sidecar reachable over http.
+#
+# The main demo container points ``FACESWAP__SIDECAR__SIDECAR_URL`` at
+# ``http://liveemote-facefusion:8001`` which routes through the user-defined
+# ``liveemote`` network. Disable this by removing the env var in your
+# overrides — the adapter falls back to the in-process FaceFusionVendorDaemon
+# (which degrades to passthrough on Python 3.10 hosts).
 services:
   demo:
     build: .
-    command: python -m apps.demo_server.main --character ./character_input --hermes-mode fake
-    ports: ["8080:8080"]
-    volumes: [".:/app"]
+    command: >-
+      python -m apps.demo_server.main
+      --host 0.0.0.0
+      --port 8080
+      --character ./character_input
+      --hermes-mode fake
+      --renderer web
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
     working_dir: /app
+    environment:
+      # Auto-pick the HTTP sidecar daemon. Remove to use the in-process daemon.
+      - FACESWAP__SIDECAR__SIDECAR_URL=http://liveemote-facefusion:8001
+    depends_on:
+      - liveemote-facefusion
+    networks:
+      - liveemote
+
+  liveemote-facefusion:
+    build:
+      context: .
+      dockerfile: sidecar/Dockerfile.facefusion
+    image: liveemote/facefusion-sidecar:0.1.0
+    ports:
+      - "8001:8001"
+    environment:
+      # Shared-secret Bearer auth is opt-in. Set both to enforce auth.
+      - FACESWAP__SIDECAR__AUTH_REQUIRED=false
+      - FACESWAP__SIDECAR__API_KEY=
+      - FACESWAP__SIDECAR__VENDOR_DIR=/app/vendor/FaceFusion
+      - SIDECAR_LOG_LEVEL=INFO
+    restart: unless-stopped
+    networks:
+      - liveemote
+
+networks:
+  liveemote:
+    driver: bridge
