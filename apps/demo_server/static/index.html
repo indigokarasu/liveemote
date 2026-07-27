@@ -8,24 +8,45 @@
 </head>
 <body>
   <header>
-    <h1>LiveEmote Character Avatar</h1>
-    <p>Local affect runtime + optional agent/voice bridge + LiveTalking adapter demo with capability checks, browser perception, visual styles, and character controls.</p>
+    <h1>LiveEmote — affect-keyed live avatar</h1>
+    <p class="lede">
+      Real LLM-driven avatar with its <em>own</em> face and voice. Your webcam is
+      read as a <strong>focus + energy signal</strong>, never as a face to copy
+      or swap. The avatar mirrors/reflects your affect (delayed, damped, never
+      literal) and speaks back through the configured LLM with structured
+      voice + emotion tags.
+    </p>
   </header>
   <main>
     <section class="stage">
       <div class="panel">
-        <h2>Local webcam preview</h2>
+        <h2>Webcam (signal source)</h2>
         <video id="webcam" autoplay muted playsinline></video>
-        <p class="note">Frames stay local; the browser sends face-box, gaze, expression, and audio VAD telemetry.</p>
+        <p class="note">Frames stay local. The browser streams downsampled JPEGs to the server-side perception tracker; the avatar never displays your face.</p>
       </div>
       <div class="panel avatar">
         <h2>Avatar output</h2>
         <div id="avatarCanvas">
-          <div id="avatarBody"><span id="avatarFace">◉‿◉</span><span class="torso"></span><span class="arm left"></span><span class="arm right"></span></div>
-          <small id="watermark">Synthetic avatar output</small>
+          <div id="avatarPortrait"><span id="avatarFallback">◉‿◉</span></div>
+          <img id="avatarEmote" alt="" hidden>
+          <small id="watermark">Synthetic avatar output — identity is the chosen character, not the user on webcam.</small>
         </div>
         <audio id="speech" controls></audio>
+        <canvas id="captureCanvas" width="320" height="180" hidden></canvas>
       </div>
+    </section>
+    <section class="perception-summary">
+      <h2>Live affect signals</h2>
+      <dl class="affect">
+        <dt>Tracker</dt><dd id="trackerKind">-</dd>
+        <dt>Available</dt><dd id="trackerAvailable">-</dd>
+        <dt>Focus / attention</dt><dd id="attentionMeter">-</dd>
+        <dt>Energy / arousal</dt><dd id="arousalMeter">-</dd>
+        <dt>Valence</dt><dd id="valenceMeter">-</dd>
+        <dt>Tension</dt><dd id="tensionMeter">-</dd>
+        <dt>Head pose variance</dt><dd id="poseVar">-</dd>
+        <dt>Blink rate</dt><dd id="blinkRate">-</dd>
+      </dl>
     </section>
     <section class="controls identity-controls">
       <label>Character
@@ -52,7 +73,7 @@
     </section>
     <section class="panel character-controls">
       <h2>Scene characters</h2>
-      <p class="note">Switch between discovered local character folders without restarting the server.</p>
+      <p class="note">Switch between discovered local character folders without restarting the server. Each character's canonical still is the avatar's own face.</p>
       <div class="character-row"><select id="characterPathSelect"></select><button id="selectCharacter">Load character</button></div>
     </section>
     <section class="panel meeting-test">

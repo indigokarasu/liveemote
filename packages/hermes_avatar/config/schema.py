@@ -59,6 +59,8 @@ class AgentConfig(BaseModel):
     mode: str = "fake"
     harness: str = "generic"
     url: str = "ws://127.0.0.1:18789/avatar"
+    base_url: str = "https://api.openai.com"
+    model: str = "gpt-4o-mini"
 
 class RendererConfig(BaseModel):
     livetalking_url: str = "http://127.0.0.1:8010"

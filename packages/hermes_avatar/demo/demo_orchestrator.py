@@ -2,82 +2,24 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-import logging
 import time
 
 from hermes_avatar.affect.policy import AffectRuntime
 from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
 from hermes_avatar.character.ingest import build_asset_index
-from hermes_avatar.config.schema import AppConfig, load_config, reload_config
+from hermes_avatar.config.schema import AppConfig, load_config
 from hermes_avatar.demo.meeting_join import MeetingJoinService
+from hermes_avatar.perception.mediapipe_tracker import build_tracker, MediaPipeFaceTracker, NullFaceTracker
 from hermes_avatar.protocol.agent_bridge import AgentBridge
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
-from hermes_avatar.voice.base import VoiceBackend, VoiceStyle
+from hermes_avatar.renderer.web_renderer import WebRenderer
+from hermes_avatar.voice.base import VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
-from prometheus_client import Counter, Histogram
 
-logger = logging.getLogger(__name__)
-
-# Prometheus metrics for orchestrator operations
-AFFECT_TICKS = Counter(
-    'demo_affect_runtime_ticks_total',
-    'Total number of affect runtime ticks'
-)
-
-EVENT_PROCESSING_TIME = Histogram(
-    'demo_event_processing_seconds',
-    'Time taken to process events'
-)
-
-AGENT_RESPONSE_TIME = Histogram(
-    'demo_agent_response_seconds',
-    'Time taken for agent to generate response'
-)
-
-CHARACTER_LOADS = Counter(
-    'demo_character_loads_total',
-    'Total number of character loads'
-)
-
-STYLE_CHANGES = Counter(
-    'demo_style_changes_total',
-    'Total number of style changes'
-)
-
-BACKGROUND_CHANGES = Counter(
-    'demo_background_changes_total',
-    'Total number of background changes'
-)
-
-WORKFLOW_EXECUTIONS = Counter(
-    'demo_workflow_executions_total',
-    'Total number of workflow executions',
-    ['workflow']
-)
-
-MEETING_JOINS = Counter(
-    'demo_meeting_joins_total',
-    'Total number of meeting joins'
-)
-
-MEETING_LEAVES = Counter(
-    'demo_meeting_leaves_total',
-    'Total number of meeting leaves'
-)
-
-INTERRUPTS = Counter(
-    'demo_interrupts_total',
-    'Total number of interruptions'
-)
-
-RESETS = Counter(
-    'demo_resets_total',
-    'Total number of resets'
-)
 
 def discover_character_catalog(
     character: str | Path,
@@ -99,16 +41,18 @@ def discover_character_catalog(
         character_catalog[index.character_id] = index
     return character_roots, character_catalog
 
+
 class DemoOrchestrator:
     def __init__(
         self,
         character: str,
-        renderer: str = "livetalking",
+        renderer: str = "web",
         voice_backend: str = "luxtts",
         agent_mode: str = "fake",
         config: AppConfig | None = None,
         agent_url: str | None = None,
         agent_harness: str = "generic",
+        perception_tracker: str = "mediapipe",
     ) -> None:
         self.config = config or load_config()
         self.character_roots, self.character_catalog = discover_character_catalog(character)
@@ -121,25 +65,39 @@ class DemoOrchestrator:
         self.active_background_id = self.index.default_background_id
         self.sync_background_to_style = True
         self.runtime = self._new_runtime()
-        self.agent_mode = agent_mode
-        self.agent_harness = agent_harness
-        self.agent = AgentBridge(agent_mode, agent_url or self.config.agent.url, agent_harness)
+        self.agent = AgentBridge(
+            agent_mode,
+            agent_url or self.config.agent.url,
+            agent_harness,
+            base_url=self.config.agent.base_url,
+            model=self.config.agent.model,
+        )
         self.hermes = self.agent  # Backward-compatible alias for older status/UI naming.
-        self.renderer = DeepLiveCamAdapter(enabled=True) if renderer == "deeplivecam" else LiveTalkingAdapter(self.config.renderer.livetalking_url)
+        self.renderer = self._build_renderer(renderer)
         self.renderer.load_character(self.index)
         self._notify_renderer_theme()
         self.voice_backend_name = voice_backend
         self.voice = self._voice_backend(voice_backend)
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
+        self.tracker: MediaPipeFaceTracker | NullFaceTracker = build_tracker(perception_tracker)
 
-    def _voice_backend(self, backend: str) -> VoiceBackend:
+    def _voice_backend(self, backend: str):
         normalized = (backend or "none").lower().replace("_", "-")
         if normalized in {"none", "off", "disabled", "silent", "no-tts"}:
             return NoopVoiceAdapter()
         if normalized == "elevenlabs":
             return ElevenLabsAdapter(cache_dir=self.config.voice.cache_dir)
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
+
+    def _build_renderer(self, renderer: str):
+        normalized = (renderer or "web").strip().lower()
+        if normalized == "livetalking":
+            return LiveTalkingAdapter(self.config.renderer.livetalking_url)
+        if normalized == "deeplivecam":
+            return DeepLiveCamAdapter(enabled=True)
+        # Default and any unknown value get the self-driven browser renderer.
+        return WebRenderer()
 
     def _new_runtime(self) -> AffectRuntime:
         def lookup(state: str) -> str | None:
@@ -157,10 +115,7 @@ class DemoOrchestrator:
     def _notify_renderer_theme(self) -> None:
         set_theme = getattr(self.renderer, "set_theme", None)
         if callable(set_theme):
-            style = self.active_style()
-            background = self.active_background()
-            if style is not None and background is not None:
-                set_theme(self.index, style, background)
+            set_theme(self.index, self.active_style(), self.active_background())
 
     def _neutral_avatar_state(self) -> AvatarBehaviorState:
         neutral_emote = self.index.find_emote("neutral")
@@ -192,8 +147,8 @@ class DemoOrchestrator:
             "active_style_id": self.active_style_id,
             "active_background_id": self.active_background_id,
             "sync_background_to_style": self.sync_background_to_style,
-            "active_style": asdict(self.active_style()) if self.active_style() is not None else None,
-            "active_background": asdict(self.active_background()) if self.active_background() is not None else None,
+            "active_style": asdict(self.active_style()) if self.active_style() else None,
+            "active_background": asdict(self.active_background()) if self.active_background() else None,
             "capabilities": self.capabilities(),
             "meeting": self.meeting.status(),
         }
@@ -213,42 +168,45 @@ class DemoOrchestrator:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
         voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
         agent_caps = self.agent.capability_status() if hasattr(self.agent, "capability_status") else {"backend": type(self.agent).__name__}
+        tracker_kind = self.tracker.kind() if self.tracker else "null"
+        tracker_available = self.tracker.is_available() if self.tracker else False
         return {
             "renderer": renderer_caps,
             "voice": voice_caps,
             "agent": agent_caps,
+            "perception": {
+                "backend": tracker_kind,
+                "available": tracker_available,
+                "no_face_reenactment": True,
+                "no_face_swap": True,
+                "drives": "Focus + energy derived from webcam; affects only the avatar's behavior, not its face.",
+            },
             "mobile_layout": True,
             "multi_character_switching": True,
             "cloud_manifest_available": True,
         }
 
     def apply_event(self, event: dict) -> dict:
-        start_time = time.time()
         behavior = self.runtime.consume(event)
         self.renderer.set_behavior(behavior)
-        EVENT_PROCESSING_TIME.observe(time.time() - start_time)
         return self.status()
 
     async def speak_test(self, text: str) -> dict:
         self.runtime.conversation.turn_state = "assistant_thinking"
-        start_time = time.time()
         response = await self.agent.generate_response(text, self.runtime.user)
-        AGENT_RESPONSE_TIME.observe(time.time() - start_time)
         self.last_response_text = response.text
         self.runtime.hermes_tags = response.tags
         if not response.text:
             behavior = self.runtime.tick(int(time.time() * 1000))
-            AFFECT_TICKS.inc()
             self.renderer.set_behavior(behavior)
             self.runtime.conversation.turn_state = "idle"
             return {**self.status(), "speech": None, "agent_response": asdict(response)}
 
         self.runtime.conversation.turn_state = "assistant_speaking"
         behavior = self.runtime.tick(int(time.time() * 1000))
-        AFFECT_TICKS.inc()
         response_voice = response.tags.get("voice", {}) if isinstance(response.tags.get("voice", {}), dict) else {}
         style = self.active_style()
-        style_voice = asdict(style.voice) if style is not None else {}
+        style_voice = asdict(style.voice) if style else {}
         merged_voice = {**style_voice, **response_voice}
         speech = self.voice.synthesize(
             response.text,
@@ -263,7 +221,6 @@ class DemoOrchestrator:
     def set_policy_mode(self, mode: str) -> dict:
         self.runtime.set_mode(mode)
         self.runtime.tick(int(time.time() * 1000))
-        AFFECT_TICKS.inc()
         return self.status()
 
     def set_character(self, character_id: str) -> dict:
@@ -276,7 +233,6 @@ class DemoOrchestrator:
         self.renderer.load_character(self.index)
         self._reset_runtime_for_character()
         self._notify_renderer_theme()
-        CHARACTER_LOADS.inc()
         return self.status()
 
     def set_style(self, style_id: str, sync_background: bool = True) -> dict:
@@ -288,7 +244,6 @@ class DemoOrchestrator:
         if sync_background and style.default_background_id:
             self.active_background_id = style.default_background_id
         self._notify_renderer_theme()
-        STYLE_CHANGES.inc()
         return self.status()
 
     def set_background(self, background_id: str, sync_background: bool = False) -> dict:
@@ -298,7 +253,6 @@ class DemoOrchestrator:
         self.active_background_id = background.id
         self.sync_background_to_style = sync_background
         self._notify_renderer_theme()
-        BACKGROUND_CHANGES.inc()
         return self.status()
 
     def apply_workflow(self, workflow: str) -> dict:
@@ -310,117 +264,27 @@ class DemoOrchestrator:
             self.active_background_id = rule.background_id
         elif self.sync_background_to_style:
             style = self.active_style()
-            if style is not None and style.default_background_id:
+            if style and style.default_background_id:
                 self.active_background_id = style.default_background_id
         self._notify_renderer_theme()
-        WORKFLOW_EXECUTIONS.labels(workflow=workflow).inc()
         return self.status()
 
     def trigger(self, state: str) -> dict:
         if state == "interrupt":
             self.renderer.interrupt()
             self.runtime.conversation.turn_state = "interrupted"
-            INTERRUPTS.inc()
         elif state == "reset":
             self.runtime.conversation.turn_state = "idle"
-            RESETS.inc()
         elif state in {"listening", "thinking"}:
             self.runtime.conversation.turn_state = "user_speaking" if state == "listening" else "assistant_thinking"
         self.runtime.tick(int(time.time() * 1000))
-        AFFECT_TICKS.inc()
         return self.status()
 
     def join_meeting(self, meeting_url: str, display_name: str | None = None) -> dict:
-        logger.info("meeting join requested", extra={"audit": {"event": "meeting.join", "url": meeting_url}})
         meeting = self.meeting.join(meeting_url, display_name)
-        MEETING_JOINS.inc()
         return {**self.status(), "meeting": meeting}
 
     def leave_meeting(self) -> dict:
-        logger.info("meeting leave requested", extra={"audit": {"event": "meeting.leave"}})
         meeting = self.meeting.leave()
-        MEETING_LEAVES.inc()
         return {**self.status(), "meeting": meeting}
 
-    def reload_config(self) -> dict:
-        """Reload configuration from defaults.yaml and environment variables, and update dependent components."""
-        new_config = reload_config(self.config)
-        # Track what changed to know what to recreate
-        config_changed = False
-        voice_changed = False
-        renderer_changed = False
-        agent_changed = False
-
-        # Compare relevant sections
-        if self.config.affect != new_config.affect:
-            config_changed = True
-        if self.config.gaze != new_config.gaze:
-            config_changed = True
-        if self.config.behavior != new_config.behavior:
-            config_changed = True
-        if self.config.agent != new_config.agent:
-            agent_changed = True
-            config_changed = True
-        if self.config.renderer != new_config.renderer:
-            renderer_changed = True
-            config_changed = True
-        if self.config.voice != new_config.voice:
-            voice_changed = True
-            config_changed = True
-
-        # Update the config
-        self.config = new_config
-
-        # Recreate voice backend if voice config changed
-        if voice_changed:
-            self.voice = self._voice_backend(self.voice_backend_name)
-
-        # Recreate renderer if renderer config changed
-        if renderer_changed:
-            # Determine the type of the current renderer to preserve its properties
-            if isinstance(self.renderer, DeepLiveCamAdapter):
-                # Preserve the enabled state
-                enabled = self.renderer.enabled
-                self.renderer = DeepLiveCamAdapter(enabled=enabled)
-            else:
-                # For LiveTalkingAdapter, we just create a new one with the URL
-                self.renderer = LiveTalkingAdapter(self.config.renderer.livetalking_url)
-            self.renderer.load_character(self.index)
-            self._notify_renderer_theme()
-
-        # Recreate agent if agent config changed
-        if agent_changed:
-            self.agent = AgentBridge(self.agent_mode, self.config.agent.url, self.agent_harness)
-            self.hermes = self.agent  # Update the alias
-
-        # Recreate the runtime (which depends on config) but preserve the current state
-        # We'll create a new runtime and then copy over the state from the old runtime
-        old_user = self.runtime.user
-        old_conversation = self.runtime.conversation
-        old_avatar = self.runtime.avatar
-        old_mode = self.runtime.mode
-        old_hermes_tags = self.runtime.hermes_tags
-        self.runtime = self._new_runtime()
-        # Restore the state
-        self.runtime.user = old_user
-        self.runtime.conversation = old_conversation
-        self.runtime.avatar = old_avatar
-        self.runtime.mode = old_mode
-        self.runtime.hermes_tags = old_hermes_tags
-        # Note: The expression_latch is recreated in _new_runtime, so it uses the new config's min_emote_dwell_ms.
-        # The _last_tick_ms and _last_speaking_ms are reset to 0 in _new_runtime, but we might want to preserve the last tick time?
-        # For simplicity, we'll reset them. The affect runtime will continue from the current time.
-
-        logger.info(
-            "orchestrator config reloaded",
-            extra={
-                "audit": {
-                    "event": "orchestrator.config_reloaded",
-                    "config_changed": config_changed,
-                    "voice_changed": voice_changed,
-                    "renderer_changed": renderer_changed,
-                    "agent_changed": agent_changed,
-                }
-            },
-        )
-        return self.status()
