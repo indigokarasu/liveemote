@@ -21,7 +21,7 @@ from hermes_avatar.renderer.base import Renderer
 # between tests, since load_config() reads os.environ at call time.
 # ---------------------------------------------------------------------------
 _RELEVANT_PREFIXES = ("AFFECT__", "GAZE__", "RENDERER__", "BEHAVIOR__",
-                       "AGENT__", "VOICE__", "HERMES_")
+                       "AGENT__", "VOICE__", "HERMES__", "FACESWAP__")
 
 
 @pytest.fixture(autouse=True)
