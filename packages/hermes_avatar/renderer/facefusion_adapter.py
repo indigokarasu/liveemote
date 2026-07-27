@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 import importlib
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -16,6 +18,7 @@ from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import (
     BackgroundSpec,
     CharacterIndex,
+    EmoteAsset,
     TrainingReference,
     VisualStyle,
 )
@@ -23,6 +26,73 @@ from hermes_avatar.config.schema import FaceSwapConfig
 from .base import Renderer
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Vendor daemon protocol
+# ---------------------------------------------------------------------------
+@dataclass
+class SwapRequest:
+    """Per-frame request fed to the face-swap vendor.
+
+    `source_face` is the identity anchor (the character's canonical.png, or
+    whichever training_reference carries ``role="identity_anchor"``).
+    `target_face` is the avatar's face for this frame — the active emote
+    selected by the affect policy, which is one of the
+    ``CharacterIndex.training_references`` whose role is
+    ``expression_reference`` (or, when no emote matches, the canonical itself).
+    """
+
+    frame: Any
+    source_face: str
+    target_face: str | None
+    character_id: str | None
+    emote_id: str | None
+    intensity: float
+
+
+class VendorDaemon(ABC):
+    """Contract every face-swap backend (real or fake) implements.
+
+    Real daemons wrap the vendored FaceFusion / Deep-Live-Cam Python APIs and
+    require GPU + models. ``FakeVendorDaemon`` is the in-process test seam
+    that records calls for assertions.
+    """
+
+    @abstractmethod
+    def swap(self, req: SwapRequest) -> Any: ...
+
+    @abstractmethod
+    def health(self) -> dict[str, Any]: ...
+
+
+class FakeVendorDaemon(VendorDaemon):
+    """Records every ``swap()`` call, returns the frame unchanged.
+
+    Set ``fail=True`` to exercise the orchestrator's failure-degradation
+    path. Use ``calls`` to assert which emotes / characters flowed through.
+    """
+
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[SwapRequest] = []
+        self.fail = fail
+        self.failures = 0
+
+    def swap(self, req: SwapRequest) -> Any:
+        if self.fail:
+            self.failures += 1
+            raise RuntimeError("FakeVendorDaemon configured to fail")
+        self.calls.append(req)
+        return req.frame
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "backend": "fake",
+            "ok": not self.fail,
+            "invocations": len(self.calls),
+            "failures": self.failures,
+        }
+
 
 # Default model filenames we look for to decide whether a backend can actually
 # run. Missing models => degraded passthrough (never a crash).
@@ -114,9 +184,11 @@ class BackendManager:
         self,
         config: FaceSwapConfig,
         swap_callable: Callable[[Any], Any] | None = None,
+        daemon: "VendorDaemon | None" = None,
     ) -> None:
         self.config = config
         self.swap_callable = swap_callable
+        self.daemon = daemon
         self.process: subprocess.Popen | None = None
         self.binary: list[str] | None = None
         self.available = False
@@ -128,6 +200,8 @@ class BackendManager:
         self.last_startup_error: str | None = None
         self.started_at: float | None = None
         self._lock = threading.Lock()
+        self._failure_count = 0
+
 
     # ---- detection ------------------------------------------------------
     def _detect_binary(self) -> list[str] | None:
@@ -362,9 +436,34 @@ class BackendManager:
 
     # ---- swapping --------------------------------------------------------
     def swap(self, frame: Any) -> Any:
-        if not self.available or self.passthrough or self.process is None:
+        """Legacy raw-frame swap. Returns the (possibly swapped) frame.
+
+        Kept for backwards compatibility with the existing test suite that
+        injects a ``swap_callable=lambda frame: ...``. New callers should
+        prefer :meth:`swap_with_request` so the active emote / character id
+        flow into the vendor.
+
+        The gate is intentionally minimal: ``passthrough`` wins, otherwise we
+        delegate to whatever downstream is wired (daemon > swap_callable >
+        real backend). The legacy ``swap_callable`` test seam therefore works
+        in-process without requiring a real subprocess to be spawned.
+        """
+        if not self.available or self.passthrough:
             return frame  # passthrough
         try:
+            if getattr(self, "daemon", None) is not None:
+                # Even on the legacy raw-frame path, promote to a typed request
+                # so the vendor sees the source face / character context.
+                return self.daemon.swap(
+                    SwapRequest(
+                        frame=frame,
+                        source_face=self.config.source_face_path or "",
+                        target_face=None,
+                        character_id=None,
+                        emote_id=None,
+                        intensity=0.0,
+                    )
+                )
             if self.swap_callable is not None:
                 return self.swap_callable(frame)
             return self._swap_via_backend(frame)
@@ -375,6 +474,45 @@ class BackendManager:
                 extra={"audit": {"event": "faceswap.swap_failed", "error": str(exc)}},
             )
             return frame
+
+    def swap_with_request(self, req: SwapRequest) -> Any:
+        """Typed swap path. Feeds a fully-formed ``SwapRequest`` to whichever
+        daemon is wired (``self.daemon`` if present, otherwise the legacy
+        ``self.swap_callable``). Falls back to passthrough on any failure and
+        flips the manager to degraded on the first error to avoid retry storms.
+        """
+        if not self.available or self.passthrough:
+            record_swap(self.config.backend, mode="passthrough")
+            return req.frame
+        try:
+            if self.daemon is not None:
+                return self.daemon.swap(req)
+            if self.swap_callable is not None:
+                return self.swap_callable(req.frame)
+            return self._swap_via_backend(req.frame)
+        except Exception as exc:
+            self._failure_count += 1
+            record_backend_error(self.config.backend)
+            logger.error(
+                "faceswap swap_with_request failed; degrading",
+                extra={
+                    "audit": {
+                        "event": "faceswap.swap_failed",
+                        "error": str(exc),
+                        "backend": self.config.backend,
+                    }
+                },
+            )
+            # Drop to passthrough on first failure so we don't hammer a dead vendor.
+            self.passthrough = True
+            self.degraded = True
+            set_degraded(self.config.backend, True)
+            record_swap(self.config.backend, mode="passthrough")
+            return req.frame
+        finally:
+            if self._failure_count == 0 and not self.passthrough:
+                record_swap(self.config.backend, mode="swap")
+
 
     def _swap_via_backend(self, frame: Any) -> Any:
         """Call the backend's Python API for a single frame.
@@ -583,6 +721,12 @@ class FaceSwapPipeline:
 
     Supports both a one-shot :meth:`process_frame` (used by unit tests and
     per-frame callers) and a streaming :meth:`run` loop (used in production).
+
+    When constructed with ``adapter=`` (production path), every frame is
+    promoted to a typed ``SwapRequest`` carrying the active emote so the
+    vendor daemon can ground the avatar's face in the right
+    ``training_reference``. Tests that don't supply the kwarg fall through
+    to the legacy raw-frame ``manager.swap(frame)`` path.
     """
 
     def __init__(
@@ -591,21 +735,68 @@ class FaceSwapPipeline:
         sink: FrameSink,
         manager: BackendManager,
         backend: str = "facefusion",
+        *,
+        adapter: "FaceSwapAdapter | None" = None,
     ) -> None:
         self.source = source
         self.sink = sink
         self.manager = manager
         self.backend = backend
+        self.adapter = adapter
         self.frames_processed = 0
         self._running = False
         self._thread: threading.Thread | None = None
         self._last_ts = time.time()
 
     def process_frame(self, frame: Any) -> Any:
-        out = self.manager.swap(frame)
-        record_swap(self.backend, mode="swap" if not self.manager.passthrough else "passthrough")
+        # Build typed SwapRequest when adapter context is available AND the
+        # adapter has resolved a source face. The daemon (if wired) receives
+        # the request via swap_with_request; otherwise the legacy
+        # manager.swap(frame) path runs (compat with the existing test suite).
+        out: Any
+        req = self._build_request(frame)
+        if req is not None and getattr(self.manager, "daemon", None) is not None:
+            out = self.manager.swap_with_request(req)
+        elif req is not None and (
+            self.adapter is not None
+            and self.adapter.target_emote_id is not None
+            and self.adapter.target_face_path is not None
+        ):
+            # Even without a daemon, propagate the typed request so the
+            # backend manager records it; falls through to legacy swap if
+            # neither daemon nor swap_callable is wired.
+            out = self.manager.swap_with_request(req)
+        else:
+            out = self.manager.swap(frame)
+        record_swap(
+            self.backend, mode="swap" if not self.manager.passthrough else "passthrough"
+        )
         self.frames_processed += 1
         return out
+
+    def _build_request(self, frame: Any) -> SwapRequest | None:
+        if self.adapter is None:
+            return None
+        if not self.adapter.source_image_path:
+            return None
+        character_id = (
+            self.adapter.character_index.character_id
+            if self.adapter.character_index is not None
+            else None
+        )
+        intensity = (
+            float(self.adapter.behavior.intensity)
+            if self.adapter.behavior is not None
+            else 0.35
+        )
+        return SwapRequest(
+            frame=frame,
+            source_face=self.adapter.source_image_path,
+            target_face=self.adapter.target_face_path,
+            character_id=character_id,
+            emote_id=self.adapter.target_emote_id,
+            intensity=intensity,
+        )
 
     def step(self) -> bool:
         frame = self.source.read()
@@ -675,6 +866,7 @@ class FaceSwapAdapter(Renderer):
         frame_source: FrameSource | None = None,
         frame_sink: FrameSink | None = None,
         swap_callable: Callable[[Any], Any] | None = None,
+        daemon: "VendorDaemon | None" = None,
     ) -> None:
         cfg = config or FaceSwapConfig()
         overrides = {
@@ -705,7 +897,27 @@ class FaceSwapAdapter(Renderer):
         self.active_background: BackgroundSpec | None = None
         self.watermark = "Synthetic avatar output - consent required for real identities"
 
-        self.manager = backend_manager or BackendManager(self.config, swap_callable=swap_callable)
+        # Per-frame swap target — populated by set_behavior() so the daemon
+        # receives the avatar's *active* emote face, not just the canonical
+        # identity anchor. The character_index.training_references (the 24
+        # expression_reference entries the ingest builds from each emote) flow
+        # through here.
+        self.target_emote_id: str | None = None
+        self.target_emote: EmoteAsset | None = None
+        self.target_face_path: str | None = None
+
+        # Wire the daemon: callers (tests + an orchestrator hook) can pass a
+        # real VendorDaemon (GPU-bound) or a FakeVendorDaemon (in-process test
+        # recording). When given, the pipeline will use swap_with_request.
+        # Otherwise the legacy swap_callable path keeps working.
+        if backend_manager is not None:
+            self.manager = backend_manager
+            if daemon is not None:
+                self.manager.daemon = daemon
+        else:
+            self.manager = BackendManager(
+                self.config, swap_callable=swap_callable, daemon=daemon
+            )
         self.frame_source = frame_source
         self.frame_sink = frame_sink
         self.pipeline: FaceSwapPipeline | None = None
@@ -805,7 +1017,11 @@ class FaceSwapAdapter(Renderer):
                     return
         if self.frame_source is not None and self.frame_sink is not None:
             self.pipeline = FaceSwapPipeline(
-                self.frame_source, self.frame_sink, self.manager, self.config.backend
+                self.frame_source,
+                self.frame_sink,
+                self.manager,
+                self.config.backend,
+                adapter=self,
             )
             try:
                 self.frame_source.open()
@@ -820,6 +1036,10 @@ class FaceSwapAdapter(Renderer):
         self.character_index = character_index
         self.source_reference = self._select_source_face(character_index)
         self.source_image_path = self.source_reference.path if self.source_reference else None
+        # Reset target face so a stale emote_id doesn't bleed across runs.
+        self.target_emote_id = None
+        self.target_emote = None
+        self.target_face_path = None
         self._activate()
 
     def set_theme(
@@ -833,12 +1053,29 @@ class FaceSwapAdapter(Renderer):
         self.active_background = background
         self.source_reference = self._select_source_face(character_index)
         self.source_image_path = self.source_reference.path if self.source_reference else None
+        self.target_emote_id = None
+        self.target_emote = None
+        self.target_face_path = None
         self._activate()
 
     def set_behavior(self, behavior: AvatarBehaviorState) -> None:
         if behavior.lip_sync_enabled:
             return
         self.behavior = behavior
+        # Resolve the active emote to a target face for the next swap.
+        # Look up by emote_id (not state name) — the orchestrator passes the
+        # resolved id from CharacterIndex.emotes, not the state string.
+        self.target_emote_id = behavior.emote_id
+        self.target_emote = None
+        self.target_face_path = None
+        if self.character_index is not None and behavior.emote_id:
+            emote = next(
+                (e for e in self.character_index.emotes if e.id == behavior.emote_id),
+                None,
+            )
+            if emote is not None and emote.path and Path(emote.path).exists():
+                self.target_emote = emote
+                self.target_face_path = emote.path
 
     def speak(self, audio_path: str, text: str, behavior: AvatarBehaviorState) -> None:
         self.behavior = behavior
