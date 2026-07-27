@@ -1,0 +1,11 @@
+# Pinned sidecar runtime deps. The main LiveEmote pyproject.toml is the
+# source of truth for the rest; this file is ONLY used by the FaceFusion
+# Docker sidecar (sidecar/Dockerfile.facefusion).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+opencv-python-headless>=4.9
+numpy>=1.24
+Pillow>=10.0
+typing_extensions>=4.6
+httpx>=0.26

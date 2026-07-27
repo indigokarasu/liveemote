@@ -40,3 +40,15 @@ faceswap:
   models_dir: models
   require_gpu: false
   process_timeout: 30.0
+  # Sidecar split (recommended for production). Set ``sidecar_url`` to the
+  # service name from docker-compose.yml (``http://liveemote-facefusion:8001``
+  # by default) and the adapter will auto-pick ``FaceFusionSidecarDaemon``
+  # instead of attempting the in-process FaceFusionVendorDaemon, which would
+  # fail under Python 3.10. Deep-Live-Cam ignores these fields — it stays in
+  # the main process regardless.
+  sidecar_url: null
+  sidecar_api_key: null
+  sidecar_connect_timeout_s: 2.0
+  sidecar_request_timeout_s: 8.0
+  sidecar_jpeg_quality: 85
+  sidecar_require_auth: false
