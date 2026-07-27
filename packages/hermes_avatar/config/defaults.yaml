@@ -29,3 +29,14 @@ voice:
   backend: luxtts
   device: cpu
   cache_dir: cache/voice
+faceswap:
+  backend: facefusion
+  enabled: false
+  device: cpu
+  input_source: http://127.0.0.1:8010
+  frame_rate: 25
+  swap_threshold: 0.0
+  vendor_dir: vendor/FaceFusion
+  models_dir: models
+  require_gpu: false
+  process_timeout: 30.0

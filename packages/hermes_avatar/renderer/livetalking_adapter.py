@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import subprocess
 import time
 from dataclasses import asdict
@@ -9,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
+from hermes_avatar.util import (
+    CircuitBreaker,
+    OPEN,
+    compute_backoff_delay,
+    is_retryable_error,
+)
 from .base import Renderer
 from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
@@ -63,15 +67,11 @@ class LiveTalkingAdapter(Renderer):
         self.request_timeout: float = float(timeout) if timeout else 1.5
         self.connect_timeout: float = float(connect_timeout) if connect_timeout else 1.0
 
-        # Circuit breaker state. The breaker trips to "open" after
-        # ``cb_failure_threshold`` consecutive failures and refuses work for
-        # ``cb_timeout`` seconds (then probes once in "half-open") so a dead
+        # Circuit breaker (shared, thread-safe). Trips OPEN after
+        # ``failure_threshold`` consecutive failures and refuses work for
+        # ``open_timeout`` seconds (then probes once in half-open) so a dead
         # renderer is not hammered and the demo degrades gracefully.
-        self.cb_failure_count = 0
-        self.cb_last_failure_time: float | None = None
-        self.cb_state = "closed"  # closed (healthy) -> open (tripped) -> half-open (probing)
-        self.cb_failure_threshold = 5  # consecutive failures before tripping
-        self.cb_timeout = 60  # seconds the breaker stays open before probing
+        self.cb = CircuitBreaker(failure_threshold=5, open_timeout=60.0, name="renderer")
 
         # Retry configuration: exponential backoff (base_delay * 2**attempt)
         # capped at max_delay, with +/- jitter_factor proportional dithering to
@@ -92,11 +92,7 @@ class LiveTalkingAdapter(Renderer):
             "online": online,
             "endpoint_status": self.endpoint_status,
             "last_latency_ms": self.last_latency_ms,
-            "circuit_breaker": {
-                "state": self.cb_state,
-                "failure_count": self.cb_failure_count,
-                "last_failure_time": self.cb_last_failure_time,
-            },
+            "circuit_breaker": self.cb.snapshot(),
         }
 
     def load_character(self, character_index: CharacterIndex) -> None:
@@ -143,55 +139,18 @@ class LiveTalkingAdapter(Renderer):
     def leave_meeting(self) -> dict:
         return self._request("leave_meeting", {}, optional=True)
 
-    def _is_retryable_error(self, exc: Exception) -> bool:
-        """Determine if an exception is retryable with exponential backoff."""
-        # Don't retry if circuit breaker is open (handled elsewhere)
-        if self.cb_state == "open":
-            return False
-            
-        # HTTP status codes that are retryable
-        if hasattr(exc, 'response') and getattr(exc, 'response', None) is not None:
-            status_code = exc.response.status_code
-            # Retry on 5xx server errors and 429 rate limiting
-            if 500 <= status_code < 600 or status_code == 429:
-                return True
-        
-        # Network-related errors that are typically transient
-        error_str = str(exc).lower()
-        retryable_errors = [
-            'connection',
-            'timeout',
-            'timeout',
-            'network',
-            'temporary',
-            'temporarily',
-            'unavailable',
-            'service unavailable',
-            'gateway timeout',
-            'bad gateway',
-        ]
-        
-        return any(err in error_str for err in retryable_errors)
-
     def _request(self, endpoint: str, payload: dict, optional: bool = False) -> dict:
-        # Circuit breaker logic
-        if self.cb_state == "open":
-            if self.cb_last_failure_time and (time.time() - self.cb_last_failure_time) > self.cb_timeout:
-                self.cb_state = "half-open"
-                logger.info(
-                    "renderer circuit breaker probing (half-open)",
-                    extra={"audit": {"event": "renderer.cb_half_open", "endpoint": endpoint}},
-                )
+        # Circuit breaker: refuse work while OPEN (and the open window has not
+        # elapsed). allow() transitions OPEN -> HALF_OPEN for a single probe.
+        if not self.cb.allow():
+            if optional:
+                return {"ok": False, "offline": True, "endpoint": endpoint, "error": "circuit breaker open"}
             else:
-                # Circuit is open and timeout not elapsed, fail fast
-                if optional:
-                    return {"ok": False, "offline": True, "endpoint": endpoint, "error": "circuit breaker open"}
-                else:
-                    raise RendererUnavailableError("Renderer circuit breaker is open")
+                raise RendererUnavailableError("Renderer circuit breaker is open")
 
         method, path = self.ENDPOINTS[endpoint]
         last_exception = None
-        
+
         for attempt in range(self.max_retries + 1):
             started = time.perf_counter()
             try:
@@ -209,15 +168,8 @@ class LiveTalkingAdapter(Renderer):
                     }
                     r.raise_for_status()
                     data = r.json() if r.content else {}
-                    # On success, reset circuit breaker if half-open or closed
-                    if self.cb_state == "half-open":
-                        self.cb_state = "closed"
-                        self.cb_failure_count = 0
-                        self.cb_last_failure_time = None
-                        logger.info(
-                            "renderer circuit breaker recovered (closed)",
-                            extra={"audit": {"event": "renderer.cb_recovered", "endpoint": endpoint}},
-                        )
+                    # On success, reset circuit breaker if half-open or closed.
+                    self.cb.record_success()
                     return {"ok": True, **data}
             except Exception as exc:
                 elapsed = int((time.perf_counter() - started) * 1000)
@@ -227,40 +179,23 @@ class LiveTalkingAdapter(Renderer):
                     "error": str(exc),
                 }
                 last_exception = exc
-                
-                # If this is the last attempt, don't retry
+
+                # If this is the last attempt, don't retry.
                 if attempt == self.max_retries:
                     break
-                
-                # Check if this is a transient error worth retrying
-                if not self._is_retryable_error(exc):
+
+                # Check if this is a transient error worth retrying.
+                if not is_retryable_error(exc):
                     break
-                
-                # Calculate delay with exponential backoff and jitter
-                delay = min(self.base_delay * (2 ** attempt), self.max_delay)
-                jitter = delay * self.jitter_factor * (2 * random.random() - 1)  # +/- jitter%
-                delay += jitter
-                delay = max(0, delay)  # Ensure non-negative
-                
+
+                # Calculate delay with exponential backoff and jitter.
+                delay = compute_backoff_delay(
+                    attempt, self.base_delay, self.max_delay, self.jitter_factor
+                )
                 time.sleep(delay)
-        
-        # Update circuit breaker on failure
-        self.cb_failure_count += 1
-        self.cb_last_failure_time = time.time()
-        if self.cb_failure_count >= self.cb_failure_threshold:
-            self.cb_state = "open"
-            logger.warning(
-                "renderer circuit breaker tripped (open)",
-                extra={
-                    "audit": {
-                        "event": "renderer.cb_open",
-                        "endpoint": endpoint,
-                        "failure_count": self.cb_failure_count,
-                        "error": str(last_exception),
-                    }
-                },
-            )
-        
+
+        # Update circuit breaker on failure.
+        self.cb.record_failure()
         if optional:
             return {"ok": False, "offline": True, "endpoint": endpoint, "error": str(last_exception)}
         raise last_exception
