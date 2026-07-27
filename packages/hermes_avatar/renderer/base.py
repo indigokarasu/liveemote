@@ -12,3 +12,9 @@ class Renderer(ABC):
     def speak(self, audio_path: str, text: str, behavior: AvatarBehaviorState) -> None: ...
     @abstractmethod
     def interrupt(self) -> None: ...
+
+    def start_webrtc(self) -> None:
+        """No-op default; LiveTalkingAdapter overrides."""
+
+    def start_virtualcam(self) -> None:
+        """No-op default; LiveTalkingAdapter overrides."""

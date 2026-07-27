@@ -1,276 +1,124 @@
-# Hermes Live Character Avatar Demo
+# liveemote
 
-Hermes Live Avatar is a local demo system that turns a canonical virtual character folder into a video-call-style embodied assistant. The cognition layer is optional and harness-agnostic: connect Hermes, OpenClaw, Deerflow, or any HTTP/WebSocket agent that can exchange compact transcript and affect JSON, or run with no LLM at all. This repository provides the body runtime: character ingest, affect policies, perception event wrappers, voice backends, renderer adapters, and a browser debug UI.
+> A real AI live avatar whose motion is keyed off *you*, without ever copying
+> *you*. The avatar has its own face and voice; your webcam is read as a
+> focus + energy signal that shapes its affect — never as a face to
+> re-enact or swap.
+
+## What this is
+
+LiveEmote runs a FastAPI demo server that pairs:
+
+1. **An autonomous avatar** rendered in the browser from the active
+   character's canonical stills + emotes. The avatar does its own motion
+   (breathing, gaze shifts, emote transitions) driven by an affect runtime
+   that is *deliberately not* a literal mirror.
+2. **A webcam perception pipeline** (MediaPipe Face Mesh on the server, plus
+   an audio VAD on the client) that extracts focus (eye aspect ratio, gaze
+   centrality, blink cadence) and energy (head-pose variance, mouth-open
+   amplitude). Frames never reach the avatar.
+3. **A real LLM** that handles the avatar's spoken replies. The runtime ships
+   with an OpenAI-compatible chat-completions adapter so any provider works
+   (OpenAI, SambaNova, llama.cpp, Together, OpenRouter, LM Studio). The
+   adapter asks the model for a tiny structured JSON contract:
+   ``{text, tags:{affect, voice:{pace,warmth,intensity}}}``.
+
+The affect runtime (**packages/hermes_avatar/affect/**) is the heart of the
+rebrand. ``reflect_policy.py`` and ``mirror_policy.py`` already encode a
+psychological model of *deliberately damped* mimicry: high valence gets a
+small delayed smile, high tension gets validated and grounded, low attention
+gets a spacious silence. The avatar never amplifies anger or copies movement;
+it tunes itself to the user's focus and energy.
+
+## Quick start
+
+```bash
+make setup                # pip install -e ".[test]" + sample character + vendor clones
+python -m apps.demo_server.main \
+    --character ./character_input \
+    --renderer web \
+    --agent-mode openai_compatible \
+    --voice-backend luxtts
+```
+
+Then visit ``http://127.0.0.1:8080``. Grant camera + mic permission; the
+avatar will appear to the right of the webcam preview and start mirroring /
+reflecting your affect.
+
+### Renderers
+
+| Flag | Backend | Behaviour |
+|------|---------|-----------|
+| `--renderer web` (default) | Self-driven browser avatar | The character's own canonical image + emotes are animated autonomously from the affect runtime. No face re-enactment. |
+| `--renderer livetalking` | LiveTalking | Opt-in face-reenactment over the vendored LiveTalking daemon. |
+| `--renderer deeplivecam` | Deep-Live-Cam | Opt-in face-swap over the vendored Deep-Live-Cam. |
+
+### Agent / LLM
+
+| Flag | Source | Notes |
+|------|--------|-------|
+| `--agent-mode openai_compatible` | OpenAI-compatible chat completions | Real LLM. Reads ``OPENAI_COMPATIBLE_*`` env vars. Default. |
+| `--agent-mode openclaw\|hermes\|deerflow\|external` | Existing OCAS agent harness | Websocket / HTTP JSON contract, no LLM SDK required. |
+| `--agent-mode fake` | Local parametric | Echo / canned reply, useful for UI development. |
+| `--agent-mode offline` | None | Affect mirroring / reflecting continues, no spoken text. |
+
+### Voice
+
+The avatar's voice is the configured voice backend. Default is LuxTTS
+(local parametric with optional upstream wiring through ``$LUXTTS_COMMAND``).
+ElevenLabs is selectable via ``--voice-backend elevenlabs`` (set
+``ELEVENLABS_API_KEY`` + ``ELEVENLABS_VOICE_ID``).
+
+## Dependencies
+
+``make setup`` installs the local package, generates tiny local sample
+character media, and clones the optional source repositories into vendor/ so
+the demo does not depend on global source checkouts:
+
+- vendor/LiveTalking
+- vendor/Deep-Live-Cam
+- vendor/LuxTTS
+- vendor/MOSS-TTS
+
+For server-side perception (``--perception-tracker mediapipe``, default),
+install the optional extras:
+
+```bash
+pip install -e ".[perception]"
+```
+
+Without ``[perception]`` the runtime still imports; the tracker degrades to
+``NullFaceTracker`` and the avatar still mirrors/reflects from whatever
+fallback signals it sees.
 
 ## Architecture
 
-```text
-User mic + webcam
-  -> browser/local perception events (audio VAD, face box, gaze confidence, expression classification)
-  -> hermes-affect-runtime (rolling state, mirror/reflect policy, smoothing)
-  -> agent bridge (offline, fake, or external compact summaries for Hermes/OpenClaw/Deerflow/etc.)
-  -> optional voice backend (disabled, LuxTTS vendor command or local parametric WAV, ElevenLabs, experimental MOSS-TTS)
-  -> LiveTalking adapter (lip-sync/WebRTC/virtualcam handoff)
-  -> browser demo / virtual camera
+```
+apps/demo_server/
+  routes.py         ← HTTP + WS (incl. /api/perception/video, /api/character/asset)
+  static/           ← browser avatar (canonical + emotes, SVG fallback, breathing)
+packages/hermes_avatar/
+  affect/           ← mirror/reflect policy + smoothing + reaction-delay
+  perception/       ← MediaPipe Face Mesh → focus + energy signals
+  protocol/         ← AgentBridge + OpenAI-compatible LLM adapter
+  renderer/         ← WebRenderer (default), LiveTalking, Deep-Live-Cam
+  voice/            ← LuxTTS, ElevenLabs, no-op
+  demo/             ← DemoOrchestrator + meeting join + character discovery
 ```
 
-## Hardware assumptions
+## What's intentionally NOT here
 
-- Python 3.11+
-- Webcam and microphone for live perception
-- CPU works for the local parametric voice and browser demo
-- NVIDIA GPU, Apple MPS, or a fast CPU is recommended for real LuxTTS and LiveTalking inference
-- Virtual camera output requires platform-specific camera plumbing plus `pyvirtualcam`
+- No face-reenactment in the default path. LiveTalking / Deep-Live-Cam are
+  reachable only as opt-in choices because they copy the user's face frame
+  by frame.
+- No voice cloning. The avatar's voice is the configured TTS backend speaking
+  the LLM's words; the user's voice is not recorded, cloned, or played back.
+- No canned behaviour as the default. ``--agent-mode fake`` exists for
+  development but the demo now boots in ``openai_compatible`` mode.
 
-## Dependency setup
+---
 
-```bash
-make setup
-```
+*liveemote is part of the [OCAS Agent Suite](https://github.com/indigokarasu).*
 
-`make setup` installs the local package, generates tiny local sample character media, and clones the required source repositories into `vendor/` so the demo does not depend on global source checkouts:
-
-- `vendor/LiveTalking`
-- `vendor/Deep-Live-Cam`
-- `vendor/LuxTTS`
-- `vendor/MOSS-TTS`
-
-## Character folder spec
-
-The default character folder is `./character_input`. Binary demo media is generated locally instead of tracked in git so GitHub can render the PR diff cleanly:
-
-```bash
-python scripts/create_sample_character.py --character ./character_input
-```
-
-```text
-character_input/
-  canonical/
-    canonical.png              # required
-    profile.yaml               # optional
-    voice_reference.wav        # optional, required for local voice clone
-    elevenlabs_voice_id.txt    # optional
-  emotes/
-    neutral/
-    listening/
-    thinking/
-    happy/
-    concerned/
-    apologetic/
-    amused/
-    sad/
-    error_recovery/
-```
-
-Supported emote media: `.png`, `.jpg`, `.webp`, `.mp4`, `.mov`, `.webm`. Optional paired `.wav` files are currently ignored unless explicitly tagged later.
-
-The ingest path builds a `CharacterIndex` containing the canonical image, optional voice reference, optional ElevenLabs voice id, discovered emotes with deterministic ids such as `listening_001`, and a `training_references` manifest for renderer/model backends. The canonical image is always included as an `identity_anchor`; every static emote image (`.png`, `.jpg`, `.jpeg`, `.webp`) is also included as an `expression_reference` with its emote state and tags. Videos remain playable emotes but are not added as training references because most identity-consistency training or image-reference pipelines expect still frames.
-
-For emotes that do not fit the `emotes/<state>/` folder layout, declare them in `canonical/profile.yaml` under `emotes`. Profile emote paths may point anywhere relative to the character root, including sibling asset directories, and can carry explicit ids, tags, priority, intensity, duration, and variant names. A profile item can also declare a `variants` list for multiple clips or stills that share one behavior state:
-
-```yaml
-emotes:
-  - state: greeting
-    variants:
-      - name: wave
-        path: extras/wave.png
-        priority: 5
-        tags: [intro]
-      - name: nod
-        path: extras/nod.mp4
-        duration_ms: 1200
-  - id: wink_custom
-    state: wink
-    variant: playful
-    path: ../shared-emotes/wink.webp
-    tags: [playful]
-```
-
-When multiple variants exist for a state, `CharacterIndex.emotes_for(state)` returns all matching variants sorted by highest priority and deterministic id, while `find_emote(state)` returns the default/highest-priority variant for existing runtime callers.
-
-### Using ~30 emote images for a consistent character
-
-Place the images under state folders in `character_input/emotes/<state>/` and keep `character_input/canonical/canonical.png` as the clean neutral identity anchor. For example, put multiple happy images in `emotes/happy/`, sad images in `emotes/sad/`, and attentive/listening images in `emotes/listening/`. When `build_asset_index()` runs, all supported static images are included in `CharacterIndex.training_references`, so a renderer can train or condition on the same character across expression states while still using deterministic emote ids for playback.
-
-Recommended dataset hygiene for consistency:
-
-- Use the same character design, outfit, camera angle range, crop, and background style across all expression images.
-- Keep one high-quality neutral/canonical image; it receives the strongest identity-anchor role.
-- Spread the ~30 images across expression states instead of putting all of them in one folder, so the manifest labels the expression coverage.
-- Avoid mixing different art styles or revised character designs unless you intend the model to learn that variation.
-
-
-
-## Characters, styles, voices, and backgrounds
-
-Each character can declare visual styles, voice defaults, background options, and workflow-to-style rules in `canonical/profile.yaml`. A style is the presentation layer for the same character identity: for example the bundled Indigo sample includes `neutral`, `cyberpunk`, `cozy`, and `glitch`. Each style may set voice pacing/warmth/intensity, renderer prompt metadata, workflow tags, and a default background. Backgrounds can be synchronized to the chosen style or selected independently in the debug UI.
-
-The browser demo exposes dropdowns for Character, Style, Background, and Workflow. Selecting a workflow applies the configured rule, such as `coding -> cyberpunk`, `book_writing -> cozy`, or `debugging -> glitch`. The current implementation keeps the rules explicit in the character profile so future Hermes task classifiers can choose the same style IDs without changing renderer or voice backends.
-
-To run a multi-character test, pass a directory whose immediate children are character folders with their own `canonical/` directories. Passing a single character folder still works and shows one character in the dropdown.
-
-## Launch the WebRTC/browser demo
-
-```bash
-make demo CHARACTER=./character_input
-```
-
-Open <http://127.0.0.1:8080>. The page shows local webcam preview, a full-body synthetic avatar preview, current behavior mode, audio VAD state, face detected state, gaze target/confidence, emotion confidence, active emote, renderer/voice capability status, Hermes text, multi-character controls, and manual controls.
-
-For a dependency-light demo path using fake Hermes:
-
-```bash
-make demo-fake-hermes CHARACTER=./character_input
-```
-
-
-## Google Meet WebRTC test mode
-
-The browser demo includes a **Google Meet WebRTC test mode** panel for checking the avatar path against real meeting latency. Paste a Meet link such as `https://meet.google.com/abc-defg-hij`, optionally set the participant name, and click **Join Meet**. The demo validates Meet URLs, asks the LiveTalking adapter to join through `/avatar/join_meeting`, and reports the measured local join handoff latency in the UI.
-
-If the running LiveTalking process does not yet expose meeting-join support, the local demo falls back to opening a Chromium-family browser with WebRTC camera/microphone permissions pre-approved. Google may still require sign-in, lobby confirmation, or host admission before the avatar appears in the meeting.
-
-## Launch virtual camera mode
-
-```bash
-make demo-virtualcam CHARACTER=./character_input
-```
-
-The LiveTalking adapter exposes a `start_virtualcam()` hook. Real virtual camera output requires LiveTalking and platform virtual camera dependencies to be installed and configured.
-
-## Voice backends
-
-### Local LuxTTS voice clone
-
-Use the default backend:
-
-```bash
-python -m apps.demo_server.main --character ./character_input --voice-backend luxtts
-```
-
-Place a reference voice at `character_input/canonical/voice_reference.wav`. The adapter caches the reference prompt location and writes generated WAVs to `cache/voice`. For full LuxTTS wiring, set `LUXTTS_COMMAND` to a command template that writes a WAV to `{output}` and may use `{text}`, `{reference}`, `{device}`, and `{vendor_dir}`. When that command is absent, the adapter uses a deterministic local parametric voice with duration and synthesis latency reporting, so TTS timing is still measured in local demos.
-
-### ElevenLabs voice
-
-Set environment variables or `.env` values:
-
-```bash
-export ELEVENLABS_API_KEY=...
-export ELEVENLABS_VOICE_ID=...
-python -m apps.demo_server.main --character ./character_input --voice-backend elevenlabs
-```
-
-Alternatively, store the voice id in `character_input/canonical/elevenlabs_voice_id.txt` and pass it into a custom config/adapter.
-
-### MOSS-TTS
-
-MOSS-TTS is experimental and only enabled explicitly:
-
-```bash
-python -m apps.demo_server.main --character ./character_input --voice-backend moss
-```
-
-The adapter currently raises a clear `NotImplementedError` until the optional streaming model dependencies are installed and integrated.
-
-
-### Deep-Live-Cam models
-
-`make setup` clones Deep-Live-Cam and downloads the recommended upstream model files into `vendor/Deep-Live-Cam/models` before first run:
-
-```bash
-make setup
-```
-
-To manage the models separately, run:
-
-```bash
-make deeplivecam-models
-```
-
-To verify an existing checkout without downloading anything, run:
-
-```bash
-make check-deeplivecam-models
-```
-
-The setup helper downloads `inswapper_128_fp16.onnx` and `GFPGANv1.4.onnx` from `https://huggingface.co/hacksider/deep-live-cam/tree/main`. If your checked-out Deep-Live-Cam runtime expects the older `inswapper_128.onnx` or `GFPGANv1.4.pth` filenames, run `python scripts/setup_deeplivecam_models.py --include-legacy`. The `vendor/` payload remains ignored so large model files are not committed.
-
-## Connecting an agent harness or running without an LLM
-
-The avatar body runtime is not tied to a specific agent. Use `agent.mode: external` with a generic harness name, or use convenience modes/names such as `openclaw`, `hermes`, or `deerflow`. Configure the URL in `packages/hermes_avatar/config/defaults.yaml` or your own config:
-
-```yaml
-agent:
-  mode: external
-  harness: openclaw   # or hermes, deerflow, generic, etc.
-  url: ws://127.0.0.1:18789/avatar
-  send_events: [user.transcript, affect.summary, interruption]
-  receive_events: [agent.response, agent.behavior_hint]
-```
-
-Launch with:
-
-```bash
-python -m apps.demo_server.main --character ./character_input --agent-mode external --agent-harness openclaw --agent-url ws://127.0.0.1:18789/avatar
-```
-
-The bridge sends compact transcripts and affect summaries. It does **not** send raw video frames to the agent by default. External agents may return `text` plus optional `tags`, but the bridge also accepts common response shapes such as `content`, `response`, `message.content`, `output.text`, `tags`, `affect_tags`, or scalar `emotion`.
-
-For a pure body-runtime demo with no LLM and no TTS installed, disable both the agent and voice backend:
-
-```bash
-python -m apps.demo_server.main --character ./character_input --agent-mode offline --voice-backend none
-```
-
-In this mode the avatar cannot produce spoken replies or mine conversation text for emotion/sentiment tags, but camera/audio perception events, manual controls, gaze, affect smoothing, and mirror/reflect behavior continue to run locally.
-
-## Affect runtime behavior
-
-The deterministic baseline runtime runs independently of the LLM and consumes JSON events:
-
-- `perception.frame`
-- `audio.vad`
-- `agent.response` / `hermes.response`
-
-It maintains rolling user/conversation/avatar state, smooths continuous values with exponential moving averages, latches expression changes with dwell time, clamps gaze/head movement, and supports `mirror` and `reflect` policy modes. Assistant speaking enables lip-sync and prevents camera mirroring from overriding the mouth.
-
-## LiveTalking adapter
-
-`LiveTalkingAdapter` now has a contract-first HTTP surface. It tracks health plus character, emote, behavior, speak, interrupt, WebRTC, virtual camera, join-meeting, and leave-meeting endpoints. Unsupported or offline endpoints are reported in `/api/status` under `capabilities.renderer.endpoint_status` with latency and error details, so operators can see exactly which LiveTalking features are active.
-
-## Deep-Live-Cam safety note
-
-Deep-Live-Cam is optional and off by default. Do not use a real person's face identity as output unless you have explicit permission. Clearly label shared synthetic/deepfake output; the adapter includes a synthetic-output watermark string for this reason.
-
-## Multi-character, mobile, and cloud deployment
-
-The browser UI discovers sibling character folders with `canonical/` assets and can switch the active character through `/api/character/select` without restarting the server. The CSS layout is responsive for narrow/mobile browser debugging. `Dockerfile` plus `deploy/k8s/demo.yaml` provide a container and Kubernetes Deployment/Service starter path for cloud-hosted demos. Generated audio is served only from the configured voice cache.
-
-## Required commands
-
-```bash
-make setup
-make demo CHARACTER=./character_input
-make demo-fake-hermes CHARACTER=./character_input
-make demo-virtualcam CHARACTER=./character_input
-make test
-```
-
-
-## PR push safety
-
-The third-party upstream repositories are cloned into `vendor/` for local development only and are intentionally ignored by git. Use this check before pushing a PR branch:
-
-```bash
-make push-check
-```
-
-The check fails if cloned vendor payloads, nested `.git` metadata, binary files, or large generated files are accidentally tracked. It also warns when the local checkout has no remote configured, because that environment cannot push until a remote is added by the caller.
-
-## Capability coverage
-
-- Local voice output is always available through either `LUXTTS_COMMAND` vendor wiring or the deterministic local parametric WAV generator, and every synthesis response reports duration plus latency.
-- LiveTalking integration exposes endpoint-by-endpoint capability and latency reporting instead of silent best-effort no-ops.
-- Browser perception uses local camera/audio APIs to send face-box, gaze-confidence, expression-confidence, and VAD telemetry without raw frame upload.
-- The affect state carries emotion confidence, gaze confidence, TTS latency, and full-body pose hints used by the browser avatar preview.
-- Responsive browser controls, runtime character switching, a Dockerfile, and a Kubernetes starter manifest are included for mobile debugging, multi-character demo workflows, and cloud demo deployment.
+## 📄 License
+MIT License — see `LICENSE` for details.

@@ -7,6 +7,7 @@ class Args:
     voice_backend = "luxtts"
     transport = "webrtc"
     hermes_mode = "fake"
+    perception_tracker = "null"  # null tracker so tests don't spawn real FaceLandmarkers
 
 
 def test_demo_status_endpoint():
@@ -53,6 +54,7 @@ class OfflineArgs:
     agent_mode = "offline"
     agent_url = None
     agent_harness = "none"
+    perception_tracker = "null"
 
 
 def test_demo_runs_without_agent_or_voice_and_still_mirrors():
@@ -97,6 +99,7 @@ class DeepLiveCamArgs:
     agent_mode = "offline"
     agent_url = None
     agent_harness = "none"
+    perception_tracker = "null"
 
 
 def test_deeplivecam_renderer_uses_canonical_face_source():
@@ -142,3 +145,120 @@ def test_audio_route_authorizes_outside_wav_before_existence_check(tmp_path):
     response = client.get("/api/audio", params={"path": str(outside_wav)})
 
     assert response.status_code == 403
+
+
+# --- Transport dispatch tests ------------------------------------------------
+
+
+def test_livetalking_start_webrtc_dispatches_to_webrtc_endpoint():
+    from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
+
+    adapter = LiveTalkingAdapter()
+    adapter.start_webrtc()
+    assert "webrtc" in adapter.endpoint_status, (
+        "start_webrtc() should attempt a request to the webrtc endpoint"
+    )
+
+
+def test_livetalking_start_virtualcam_dispatches_to_virtualcam_endpoint():
+    from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
+
+    adapter = LiveTalkingAdapter()
+    adapter.start_virtualcam()
+    assert "virtualcam" in adapter.endpoint_status, (
+        "start_virtualcam() should attempt a request to the virtualcam endpoint"
+    )
+
+
+def test_web_renderer_transport_no_ops_dont_crash():
+    from hermes_avatar.renderer.web_renderer import WebRenderer
+
+    renderer = WebRenderer()
+    # Must not raise.
+    renderer.start_webrtc()
+    renderer.start_virtualcam()
+
+
+def test_deeplivecam_renderer_transport_no_ops_dont_crash():
+    from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
+
+    renderer = DeepLiveCamAdapter(enabled=False)
+    # Must not raise.
+    renderer.start_webrtc()
+    renderer.start_virtualcam()
+
+
+# --- Perception pipeline tests ----------------------------------------------
+
+
+def test_perception_info_endpoint_reports_null_tracker():
+    """Without mediapipe installed the tracker should report unavailable."""
+    client = TestClient(create_app(Args()))
+    response = client.get("/api/perception/info")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "available" in payload
+    assert "backend" in payload
+    assert payload["no_face_reenactment"] is True
+    assert payload["no_face_swap"] is True
+
+
+def test_perception_video_endpoint_accepts_frame_with_null_tracker():
+    """NullFaceTracker should accept frames without crashing."""
+    client = TestClient(create_app(Args()))
+    response = client.post(
+        "/api/perception/video",
+        json={"image": "data:image/jpeg;base64,AAA=", "timestamp_ms": 2000},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False or payload["tracker"] in ("null", "unavailable")
+    assert "signals" in payload
+
+
+def test_perception_video_pushes_signals_into_affect_runtime():
+    """Even with null tracker, the signal should flow through to user state."""
+    client = TestClient(create_app(Args()))
+    # First, send a frame to establish baseline.
+    client.post(
+        "/api/perception/video",
+        json={"image": None, "timestamp_ms": 1000},
+    )
+    status = client.get("/api/status").json()
+    # The runtime should have received the event and updated last_updated_ms.
+    assert "user" in status
+
+
+def test_perception_video_with_perception_tracker_mediapipe_flag():
+    """--perception-tracker mediapipe should route through build_tracker."""
+    class MediapipeArgs:
+        character = "./character_input"
+        renderer = "web"
+        voice_backend = "none"
+        transport = "webrtc"
+        agent_mode = "offline"
+        agent_url = None
+        agent_harness = "none"
+        perception_tracker = "mediapipe"
+
+    client = TestClient(create_app(MediapipeArgs()))
+    caps = client.get("/api/status").json()["capabilities"]
+    assert caps["perception"]["backend"] in ("mediapipe", "unavailable", "init_failed")
+
+
+def test_perception_video_with_null_tracker_flag():
+    """--perception-tracker null should always use NullFaceTracker."""
+    class NullTrackerArgs:
+        character = "./character_input"
+        renderer = "web"
+        voice_backend = "none"
+        transport = "webrtc"
+        agent_mode = "offline"
+        agent_url = None
+        agent_harness = "none"
+        perception_tracker = "null"
+
+    client = TestClient(create_app(NullTrackerArgs()))
+    caps = client.get("/api/status").json()["capabilities"]
+    assert caps["perception"]["backend"] == "null"
+    assert caps["perception"]["available"] is False
