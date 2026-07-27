@@ -21,6 +21,7 @@ missing vendor and stays in passthrough mode forever after.
 from __future__ import annotations
 
 import logging
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,25 @@ from .base_daemon import _VendorDaemonBase
 from .facefusion_adapter import VendorDaemon  # re-export for type clarity
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------- typing shim --
+# FaceFusion 3.x's vendored ``types.py`` uses ``typing.NotRequired`` which
+# only landed in Python 3.11. On 3.10/3.9 the import crashes the moment any
+# FF module is touched (``'type' object is not subscriptable`` because a
+# plain ``type()`` proxy doesn't support ``[List[Face]]`` subscripting like
+# a real ``_SpecialForm`` does). ``typing_extensions`` ships a proper
+# ``NotRequired`` SpecialForm for older Python versions; we forward-install
+# it under the ``typing`` namespace before any FF import succeeds. If
+# ``typing_extensions`` itself is missing the vendored FF won't import on
+# 3.10 — the daemon degrades to passthrough via the existing fallback in
+# :meth:`_load_vendor`.
+try:
+    from typing_extensions import NotRequired as _TERNotRequired
+    if not hasattr(typing, "NotRequired"):
+        typing.NotRequired = _TERNotRequired  # type: ignore[attr-defined]
+except ImportError:
+    pass  # typing_extensions missing — vendored FF won't import on 3.10, daemon degrades passthrough
 
 
 # Root of the vendored FaceFusion checkout, relative to the repo root.
@@ -50,11 +70,17 @@ class FaceFusionVendorDaemon(_VendorDaemonBase):
 
     # ----------------------------------------------------------- vendored load --
     def _load_vendor(self) -> Path:
-        """Import the FaceFusion ``facefusion`` package root. Raises
-        ``FileNotFoundError`` if ``vendor/FaceFusion`` is missing,
-        ``ImportError`` if the facefusion package isn't on sys.path,
-        ``ModuleNotFoundError`` if cv2/onnxruntime/insightface aren't
-        installed.
+        """Lightweight probe: verify the FaceFusion package root can be
+        imported under our sys.path.
+
+        We deliberately do NOT import ``facefusion.face_analyser`` or
+        ``facefusion.processors.modules.face_swapper.core`` here. The core
+        module uses ``typing.NotRequired`` (Python 3.11+) and the analyser
+        pulls in heavy ONNX/insightface deps. Both are imported lazily in
+        :meth:`_extract_face` and :meth:`_apply_swap` instead. That keeps
+        ``health()["loaded"]`` honest on CPU-only boxes where the heavy
+        modules aren't usable yet, and lets the same daemon serve on
+        ``make setup`` machines without a 280MB buffalo_l model pack.
         """
         vendor_path = self._configured_vendor_dir.resolve()
         if not vendor_path.exists():
@@ -67,102 +93,86 @@ class FaceFusionVendorDaemon(_VendorDaemonBase):
 
         try:
             facefusion_root = self._safe_import("facefusion")
-        except (ImportError, ModuleNotFoundError) as exc:
+        except (ImportError, ModuleNotFoundError, Exception) as exc:
+            # ``Exception`` covers the Python 3.10 typing.NotRequired case
+            # before our module-level shim is fully effective in race-prone
+            # imports; degrade with a clear reason instead of crashing.
             raise ImportError(
                 f"facefusion package not importable: {exc}"
             ) from exc
 
-        # FaceFusion's per-frame swapper lives at the canonical path. We
-        # don't eagerly resolve the entire package — only the modules we'll
-        # actually call.
-        try:
-            face_analyser = self._safe_import("facefusion.modules.face_analyser")
-        except (ImportError, ModuleNotFoundError) as exc:
-            raise ImportError(
-                f"facefusion.modules.face_analyser not importable: {exc}"
-            ) from exc
-        try:
-            face_swapper_mod = self._safe_import(
-                "facefusion.processors.frame.modules.face_swapper"
-            )
-        except (ImportError, ModuleNotFoundError) as exc:
-            raise ImportError(
-                f"facefusion.processors.frame.modules.face_swapper "
-                f"not importable: {exc}"
-            ) from exc
-
-        self.modules.update(
-            {
-                "facefusion_root": facefusion_root,
-                "face_analyser": face_analyser,
-                "face_swapper": face_swapper_mod,
-            }
-        )
-
-        if self.enable_face_enhancer:
-            try:
-                enhancer_mod = self._safe_import(
-                    "facefusion.processors.frame.modules.face_enhancer"
-                )
-                self.modules["face_enhancer"] = enhancer_mod
-            except (ImportError, ModuleNotFoundError) as exc:
-                logger.info(
-                    "FaceFusion enhancer unavailable; continuing without it: %s",
-                    exc,
-                )
+        self.modules["facefusion_root"] = facefusion_root
         return vendor_path
 
     # ----------------------------------------------------------------- helpers --
     def _extract_face(self, image: Any, *, role: str) -> Any:
-        """Detect + extract a single face embedding via FaceFusion's
-        ``face_analyser.get_one_face`` (RetinaFace + ArcFace). Returns the
-        vendor's face-vision-frame dict that ``process_frame`` consumes.
+        """Lazy-load ``facefusion.face_analyser`` on first call and run
+        :func:`get_one_face` (or a guarded fallback) on the image.
+
+        On any failure (vendored analyser not importable on this Python
+        build, missing buffalo_l model pack, no face detected) we return
+        ``None`` so the base class's caller falls through to passthrough.
         """
         if image is None:
             return None
-        face_analyser = self.modules["face_analyser"]
+        face_analyser = self.modules.get("face_analyser")
+        if face_analyser is None:
+            try:
+                face_analyser = self._safe_import("facefusion.face_analyser")
+                self.modules["face_analyser"] = face_analyser
+            except (ImportError, ModuleNotFoundError, Exception) as exc:
+                logger.warning(
+                    "facefusion.face_analyser unavailable; face extraction passthrough: %s",
+                    exc,
+                )
+                return None
         try:
             # FaceFusion accepts a numpy BGR ndarray; ``position`` selects the
-            # face by index when multiple are present. Most avatars have a
-            # single dominant face; if not, callers can pre-filter upstream.
+            # face by index when multiple are present.
             return face_analyser.get_one_face(image, position=0)
         except Exception:
             return None
 
     def _apply_swap(self, frame: Any, source_face: Any, target_face: Any) -> Any:
-        """Run FaceFusion's per-frame swap primitive.
+        """Lazy-load ``facefusion.processors.modules.face_swapper.core`` on
+        first call and invoke its ``process_frame`` per the documented
+        ``inputs``-dict contract.
 
-        The documented signature is::
-
-            process_frame(
-                source_face: VisionFrame,
-                reference_face: VisionFrame | None,
-                target_vision_frame: VisionFrame,
-            ) -> VisionFrame
-
-        In this codebase ``source_face`` is the character's identity anchor
-        (the canonical / identity_anchor PNG) and ``target_face`` is the
-        active emote PNG selected from ``CharacterIndex.emotes``. We pass it
-        through as the reference face so the vendored pipeline gets an actual
-        face-similarity signal per frame.
-
-        Returns the frame unchanged when the call or its prerequisites are
-        unavailable (e.g. vendored face_swapper functions aren't loaded onto
-        a registered processor chain).
+        On any failure (vendor's ``core`` module can't import on this
+        build — even with our ``NotRequired`` shim, downstream
+        ``state_manager.get_item(...)`` will KeyError if no CLI has run —
+        no face detected, ONNX model unavailable, GPU absent) the frame is
+        returned unchanged so the upstream render path never blocks.
         """
-        if source_face is None or frame is None:
+        if source_face is None or target_face is None or frame is None:
             return frame
-        face_swapper_mod = self.modules["face_swapper"]
-
-        # FaceFusion's process_frame is only wired up after its multi-step
-        # job manager registers ``face_swapper`` as an active processor. We
-        # call the underlying module function which exists even before
-        # registration, so a test subclass can stub it freely.
-        process_fn = getattr(face_swapper_mod, "process_frame", None)
+        face_swapper_core = self.modules.get("face_swapper_core")
+        if face_swapper_core is None:
+            try:
+                face_swapper_core = self._safe_import(
+                    "facefusion.processors.modules.face_swapper.core"
+                )
+                self.modules["face_swapper_core"] = face_swapper_core
+            except (ImportError, ModuleNotFoundError, Exception) as exc:
+                logger.warning(
+                    "facefusion.processors.modules.face_swapper.core unavailable; "
+                    "swap passthrough: %s",
+                    exc,
+                )
+                return frame
+        process_fn = getattr(face_swapper_core, "process_frame", None)
         if process_fn is None:
             return frame
-
         try:
-            return process_fn(source_face, target_face, frame)
+            out_frame, _out_mask = process_fn(
+                {
+                    "reference_vision_frame": target_face,
+                    "source_vision_frames": [source_face],
+                    "target_vision_frames": [target_face],
+                    "temp_vision_frame": frame,
+                    "temp_vision_mask": None,
+                }
+            )
+            return out_frame
         except Exception:
             return frame

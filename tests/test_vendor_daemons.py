@@ -112,18 +112,26 @@ def test_deeplivecam_daemon_does_not_import_at_construct():
     import_mock.assert_not_called()
 
 
-def test_facefusion_daemon_imports_only_on_first_swap():
-    """The first ``swap(req)`` triggers the vendor load probe. Subsequent
-    calls must not re-probe (idempotent).
+def test_facefusion_daemon_vendor_probe_on_first_swap():
+    """The first ``swap(req)`` triggers the vendor load probe.
+
+    Contract (vendor-absent): importlib.import_module is NEVER called —
+    the vendor-dir check fails first and short-circuits before any import.
+    Contract (vendor-present): importlib.import_module IS called —
+    _load_vendor runs the lazy probe, the daemon may succeed or degrade
+    depending on whether the heavy deps (cv2/onnxruntime/insightface) is
+    installed, but the probe must happen on first swap, not at __init__.
+    Idempotent: subsequent calls don't re-probe.
     """
     daemon = FaceFusionVendorDaemon()
+    # We'll either be in vendor-absent or vendor-present mode. Treat the
+    # file as primary when the vendor dir is checked in, passthrough
+    # otherwise.
+    vendor_present = (Path(__file__).resolve().parents[1] / "vendor" / "FaceFusion").is_dir()
+
     with patch(
         "hermes_avatar.renderer.base_daemon.importlib.import_module"
     ) as import_mock:
-        # Vendor dir is absent in this env, so _load_vendor() raises
-        # FileNotFoundError and we fall into passthrough. We assert:
-        # importlib.import_module was NOT called (because vendor dir
-        # check fails first).
         frame = np.zeros((2, 2, 3), dtype=np.uint8)
         req = SwapRequest(
             frame=frame,
@@ -135,7 +143,31 @@ def test_facefusion_daemon_imports_only_on_first_swap():
         )
         out = daemon.swap(req)
         assert np.array_equal(out, frame)
-    import_mock.assert_not_called()
+        if vendor_present:
+            # _load_vendor reached the importlib step (probe ran).
+            assert import_mock.called, (
+                "vendor dir is on disk; lazy probe should have invoked importlib"
+            )
+        else:
+            # _load_vendor short-circuited on the vendor-dir check first.
+            import_mock.assert_not_called()
+
+    # Second swap must NOT re-probe: the daemon caches the probe result.
+    with patch(
+        "hermes_avatar.renderer.base_daemon.importlib.import_module"
+    ) as import_mock_2:
+        frame2 = np.zeros((2, 2, 3), dtype=np.uint8) + 1
+        req2 = SwapRequest(
+            frame=frame2,
+            source_face="/none.png",
+            target_face=None,
+            character_id=None,
+            emote_id=None,
+            intensity=0.0,
+        )
+        out2 = daemon.swap(req2)
+        assert np.array_equal(out2, frame2)
+        import_mock_2.assert_not_called()
 
 
 def test_deeplivecam_daemon_does_not_pollute_sys_path_when_vendor_missing():
