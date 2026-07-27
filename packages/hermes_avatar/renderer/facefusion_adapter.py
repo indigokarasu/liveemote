@@ -94,6 +94,28 @@ class FakeVendorDaemon(VendorDaemon):
         }
 
 
+class _NullVendorDaemon(VendorDaemon):
+    """Trivial daemon used when ``config.backend`` doesn't map to a vendored
+    VendorDaemon. Every ``swap`` is a passthrough; ``health`` reports the
+    unknown-backend reason so operators can see it surfaced.
+    """
+
+    def __init__(self, backend_label: str) -> None:
+        self.backend_label = backend_label
+
+    def swap(self, req: SwapRequest) -> Any:
+        return req.frame
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend_label,
+            "loaded": False,
+            "degraded": True,
+            "reason": f"no VendorDaemon registered for backend={self.backend_label}",
+            "vendor_dir": None,
+        }
+
+
 # Default model filenames we look for to decide whether a backend can actually
 # run. Missing models => degraded passthrough (never a crash).
 DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
@@ -910,6 +932,20 @@ class FaceSwapAdapter(Renderer):
         # real VendorDaemon (GPU-bound) or a FakeVendorDaemon (in-process test
         # recording). When given, the pipeline will use swap_with_request.
         # Otherwise the legacy swap_callable path keeps working.
+        #
+        # Auto-pick only fires when the caller did NOT inject a
+        # ``backend_manager``. If the caller supplied a pre-built manager
+        # (production test seam) — with or without a daemon — we respect
+        # their setup and never override their manager.daemon. Production
+        # callers pass neither ``daemon`` nor ``backend_manager`` and get the
+        # auto-pick; tests pass one or both to stay in control.
+        if (
+            backend_manager is None
+            and daemon is None
+            and self.config.enabled
+        ):
+            daemon = self._build_vendor_daemon()
+
         if backend_manager is not None:
             self.manager = backend_manager
             if daemon is not None:
@@ -925,6 +961,37 @@ class FaceSwapAdapter(Renderer):
         self.replacement_active = False
         self.last_error: str | None = None
         self._activate()
+
+    # ---- vendor daemon selection ----------------------------------------
+    def _build_vendor_daemon(self) -> "VendorDaemon":
+        """Instantiate the right ``VendorDaemon`` for ``config.backend``.
+
+        Lazy-imports the concrete daemon module so the lightweight
+        ``--renderer web`` path doesn't pay for the FaceFusion/Deep-Live-Cam
+        import graph on startup. Never raises — both daemons degrade to
+        passthrough when their vendor dir / models are absent.
+        """
+        backend = (self.config.backend or "facefusion").lower()
+        try:
+            if backend in ("facefusion",):
+                from .facefusion_daemon import FaceFusionVendorDaemon
+                return FaceFusionVendorDaemon()
+            if backend in ("deeplivecam", "deep_live_cam"):
+                from .deeplivecam_daemon import DeepLiveCamVendorDaemon
+                return DeepLiveCamVendorDaemon()
+        except Exception as exc:  # pragma: no cover - defensive only
+            logger.warning(
+                "vendor daemon import failed; continuing without one",
+                extra={"audit": {"event": "faceswap.daemon_import_failed", "backend": backend, "error": str(exc)}},
+            )
+            return _NullVendorDaemon(backend)
+        # Unknown backend — return a null daemon that is a clean passthrough.
+        logger.info(
+            "no vendor daemon registered for backend=%s; using null daemon",
+            backend,
+            extra={"audit": {"event": "faceswap.daemon_unknown_backend", "backend": backend}},
+        )
+        return _NullVendorDaemon(backend)
 
     # ---- source face selection ------------------------------------------
     def _select_source_face(self, character_index: CharacterIndex) -> TrainingReference | None:
