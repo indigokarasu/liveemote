@@ -71,7 +71,7 @@ backgrounds:
     kind: gradient
     value: linear-gradient(90deg,#020617,#164e63 50%,#7f1d1d)
     synced_style_id: glitch
-    tags: [debug, system]
+    tags: [debug, system]  
 workflow_style_rules:
   - workflow: coding
     style_id: cyberpunk
@@ -85,3 +85,120 @@ workflow_style_rules:
     style_id: glitch
     background_id: glitch-grid
     description: Use glitch styling while editing or debugging the avatar system.
+emotes:
+  - state: neutral
+    path: emotes/neutral/Indigo_neutral.png
+    id: neutral_front
+  - state: neutral
+    path: emotes/neutral/Indigo_serenity.png
+    id: neutral_serenity
+    priority: 7
+  - state: neutral
+    path: emotes/neutral/Indigo_Relief.png
+    id: neutral_relief
+    priority: 5
+
+  - state: listening
+    path: emotes/listening/Indigo_pose_right_profile.png
+    id: listening_profile
+    variant: profile
+  - state: listening
+    path: emotes/listening/Indigo_pose_over_the_shoulder.png
+    id: listening_over_shoulder
+    variant: over_shoulder
+
+  - state: thinking
+    path: emotes/thinking/Indigo_thoughtful.png
+    id: thinking_thoughtful
+  - state: thinking
+    path: emotes/thinking/Indigo_pensive.png
+    id: thinking_pensive
+    priority: 7
+  - state: thinking
+    path: emotes/thinking/Indigo_quizical.png
+    id: thinking_quizzical
+    variant: quizzical
+
+  - state: happy
+    path: emotes/happy/Indigo_laugh.png
+    id: happy_laugh
+    intensity: 0.9
+    priority: 10
+  - state: happy
+    path: emotes/happy/Indigo_joy.png
+    id: happy_joy
+    intensity: 0.7
+    priority: 8
+  - state: happy
+    path: emotes/happy/Indigo_smile2.png
+    id: happy_smile2
+    intensity: 0.6
+    priority: 7
+  - state: happy
+    path: emotes/happy/Indigo_smile.png
+    id: happy_smile
+    intensity: 0.5
+    priority: 6
+
+  - state: concerned
+    path: emotes/concerned/Indigo_furious.jpg
+    id: concerned_furious
+    intensity: 0.95
+    priority: 10
+  - state: concerned
+    path: emotes/concerned/Indigo_shock.png
+    id: concerned_shock
+    variant: surprise
+    intensity: 0.85
+    priority: 9
+  - state: concerned
+    path: emotes/concerned/Indigo_consternation.png
+    id: concerned_consternation
+    intensity: 0.75
+    priority: 8
+  - state: concerned
+    path: emotes/concerned/Indigo_worry.png
+    id: concerned_worry
+    intensity: 0.7
+    priority: 7
+  - state: concerned
+    path: emotes/concerned/Indigo_doubt.png
+    id: concerned_doubt
+    intensity: 0.6
+    priority: 6
+  - state: concerned
+    path: emotes/concerned/Indigo_scruntch.png
+    id: concerned_scrunch
+    variant: scrunch
+    intensity: 0.55
+    priority: 6
+
+  - state: sad
+    path: emotes/sad/Indigo_crying.png
+    id: sad_crying
+    intensity: 0.9
+    priority: 10
+  - state: sad
+    path: emotes/sad/Indigo_sorrow.png
+    id: sad_sorrow
+    intensity: 0.7
+    priority: 8
+  - state: sad
+    path: emotes/sad/Indigo_melencholy.png
+    id: sad_melancholy
+    intensity: 0.5
+    priority: 6
+
+  - state: apologetic
+    path: emotes/apologetic/Indigo_bow.png
+    id: apologetic_bow
+  - state: apologetic
+    path: emotes/apologetic/Indigo_grimice.png
+    id: apologetic_grimace
+    variant: grimace
+
+  - state: amused
+    path: emotes/amused/Indigo_shush.png
+    id: amused_shush
+    variant: shush
+    priority: 8
