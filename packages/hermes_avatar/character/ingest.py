@@ -370,6 +370,12 @@ def build_asset_index(
     used_ids = {emote.id for emote in index.emotes}
     expression_ref_counters: dict[str, int] = {}
 
+    yaml_paths = {
+        _resolve_profile_emote_path(root, d.get("path") or d.get("file")).resolve()
+        for d in _profile_emote_entries(profile)
+        if d.get("path") or d.get("file")
+    }
+
     emote_root = root / "emotes"
     video_exts = {".mp4", ".mov", ".webm"}
     if emote_root.exists():
@@ -380,6 +386,8 @@ def build_asset_index(
                     not asset.is_file()
                     or asset.suffix.lower() not in SUPPORTED_EMOTE_EXTS
                 ):
+                    continue
+                if asset.resolve() in yaml_paths:
                     continue
                 _append_emote(
                     index,
