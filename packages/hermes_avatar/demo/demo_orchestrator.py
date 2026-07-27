@@ -129,12 +129,15 @@ class DemoOrchestrator:
         # Face-swap renderers (FaceFusion or Deep-Live-Cam) are handled by the
         # same backend-agnostic adapter; the ``renderer`` string selects which
         # backend binary to drive. LiveTalking remains the default working
-        # renderer when neither is chosen.
+        # renderer when neither is chosen. The adapter is gated by
+        # ``config.faceswap.enabled`` (defaults False), so naming the renderer
+        # does NOT auto-start the model. Opt in via
+        # ``FACESWAP__ENABLED=true`` in the environment.
         if renderer in ("facefusion", "deeplivecam"):
             self.renderer = FaceSwapAdapter(
                 config=self.config.faceswap,
                 backend=renderer,
-                enabled=True,
+                enabled=self.config.faceswap.enabled,
             )
         else:
             self.renderer = LiveTalkingAdapter(self.config.renderer.livetalking_url)
@@ -393,11 +396,10 @@ class DemoOrchestrator:
             # FaceSwapAdapter instances; recreate preserving the backend + enabled
             # flag from the freshly reloaded config.
             if isinstance(self.renderer, FaceSwapAdapter):
-                enabled = self.renderer.config.enabled
                 self.renderer = FaceSwapAdapter(
                     config=self.config.faceswap,
                     backend=self.renderer.config.backend,
-                    enabled=enabled,
+                    enabled=self.config.faceswap.enabled,
                 )
             else:
                 # For LiveTalkingAdapter, we just create a new one with the URL
