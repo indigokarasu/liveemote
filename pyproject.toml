@@ -24,4 +24,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "performance: performance or benchmark tests (not run in the default CI suite)",
-]
+    "gpu: tests that require a CUDA host and physical GPU (skipped on CPU-only sandboxes)",
+] 
