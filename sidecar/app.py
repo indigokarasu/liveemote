@@ -20,11 +20,12 @@ from __future__ import annotations
 import io
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 
 from .facefusion_runner import FaceFusionRunner
@@ -40,23 +41,45 @@ VENDOR_DIR = Path(os.getenv("FACESWAP__SIDECAR__VENDOR_DIR", "/app/vendor/FaceFu
 API_KEY = os.getenv("FACESWAP__SIDECAR__API_KEY", "")
 AUTH_REQUIRED = os.getenv("FACESWAP__SIDECAR__AUTH_REQUIRED", "false").lower() in ("1", "true", "yes")
 
-app = FastAPI(title="LiveEmote FaceFusion Sidecar", version="0.1.0")
 _runner = FaceFusionRunner(vendor_dir=VENDOR_DIR)
+
+
+# -----------------------------------------------------------------------------
+# Lifespan — replace ``@app.on_event("startup")`` (deprecated since FastAPI
+# 0.110). The :func:`@asynccontextmanager` body runs once before the first
+# request comes in; the post-yield block (empty here) runs on shutdown.
+# Wrapped in ``try/except`` so a vendor import failure cannot prevent the
+# container from binding to :8001 — the server still serves /health and
+# /swap in passthrough mode while a human investigates.
+# -----------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        _runner.warmup()
+    except Exception as exc:
+        logger.warning("eager warmup at startup failed: %s", exc)
+    yield
+
+
+app = FastAPI(
+    title="LiveEmote FaceFusion Sidecar",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 
 # -----------------------------------------------------------------------------
 # Auth — Bearer shared-secret when FACESWAP__SIDECAR__AUTH_REQUIRED=true. We
 # keep auth OPT-IN so a localhost-only docker-compose deployment doesn't need
 # any secret wiring to develop against. In production set both env vars.
+#
+# NOTE: ``Header(default=None)`` is required (not just a default argument).
+# Without the ``Header`` annotation FastAPI inspects the dep signature, treats
+# the unannotated ``str`` parameter as a query param, and the request's
+# ``Authorization`` header would never flow into this dep — every protected
+# route would 401 even with a valid token.
 # -----------------------------------------------------------------------------
-def _require_bearer(authorization: str | None = None) -> None:
-    if not AUTH_REQUIRED:
-        return
-    # FastAPI request injection below — see Depends.
-    pass
-
-
-async def _bearer_dep(authorization: str | None = None) -> None:
+async def _bearer_dep(authorization: str | None = Header(default=None)) -> None:
     if not AUTH_REQUIRED:
         return
     if not API_KEY:
@@ -210,13 +233,5 @@ async def swap(
     )
 
 
-# -----------------------------------------------------------------------------
-# Run via ``uvicorn sidecar.app:app --host 0.0.0.0 --port 8001``.
-# Eager-warm on startup so the readiness probe reaps the boot cost once.
-# -----------------------------------------------------------------------------
-@app.on_event("startup")
-async def _on_startup() -> None:  # pragma: no cover - exercised on container start
-    try:
-        _runner.warmup()
-    except Exception as exc:  # pragma: no cover - never bring the container down
-        logger.warning("eager warmup at startup failed: %s", exc)
+# Eager-warm logic lives in the ``lifespan`` context manager above. Run
+# via ``uvicorn sidecar.app:app --host 0.0.0.0 --port 8001``.
