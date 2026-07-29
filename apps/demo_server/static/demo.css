@@ -78,6 +78,21 @@ pre{white-space:pre-wrap;background:#0f172a;padding:12px;border-radius:8px;max-h
 @keyframes glitch{0%{transform:translateX(0)}33%{transform:translateX(5px)}66%{transform:translateX(-3px)}100%{transform:translateX(0)}}
 
 .perception-summary .affect dd{font-weight:600;color:var(--good)}
+/* ----- Ambient-recovering fallback (avatar shows subtle "alive" motion
+   when source webcam signal has been silent longer than
+   ``affect.ambient_after_ms`` - see packages/hermes_avatar/affect/policy.py
+   and packages/hermes_avatar/config/schema.py). Additive on top of the
+   existing ``#avatarCanvas.mode-recovering`` filter (grayscale + brightness),
+   so signal loss still subtly desaturates the avatar while these keyframes
+   keep it moving. Three independent timelines so the motion doesn't feel
+   mechanical. */
+@keyframes avatar-ambient-breath{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-2px) scale(1.012)}}
+@keyframes avatar-ambient-sway{0%,100%{transform:translateX(0) rotate(0deg)}25%{transform:translateX(2px) rotate(.4deg)}75%{transform:translateX(-2px) rotate(-.4deg)}}
+@keyframes avatar-ambient-blink-slow{0%,96%,100%{transform:scaleY(1)}98%{transform:scaleY(.08)}}
+#avatarCanvas.mode-recovering #avatarPortrait{animation:avatar-ambient-breath 8s ease-in-out infinite,avatar-ambient-sway 12s ease-in-out infinite;transform-origin:50% 70%}
+#avatarCanvas.mode-recovering .avatar-face{animation:avatar-ambient-breath 7.5s ease-in-out infinite,avatar-ambient-blink-slow 11s infinite;animation-delay:0s,1.2s}
+#avatarCanvas.mode-recovering .avatar-portrait{animation:avatar-ambient-breath 9s ease-in-out infinite,avatar-ambient-blink-slow 13s infinite;animation-delay:0s,2.4s}
+#avatarCanvas.mode-recovering #avatarEmote{transition:opacity .6s ease-out}
 .perception-summary .affect dd[data-low="true"]{color:var(--warn)}
 
 @media (max-width:900px){

@@ -191,6 +191,24 @@ class DemoOrchestrator:
         self.runtime.avatar = self._neutral_avatar_state()
 
     def status(self) -> dict:
+        # Heartbeat tick: pulse the affect runtime so the staleness clock
+        # advances even when perception events stop arriving. The browser
+        # polls /api/status every 1.5 s, so this is the heartbeat that
+        # converts ``now_ms - user.last_updated_ms > ambient_after_ms`` into
+        # an ambient-recovery ``mode="recovering"`` state. Without this the
+        # runtime would only tick on explicit events and the CSS ambient
+        # fallback would never trigger after signal loss.
+        # We deliberately do NOT call AFFECT_TICKS.inc() here: the heartbeat
+        # pulse is bookkeeping, not a real affect transition, and Prometheus
+        # tick counters should reflect visible avatar state changes only.
+        # We also pass ``accumulate_dt=False`` so the 1.5 s heartbeat does
+        # NOT advance ``self.conversation.user_turn_ms`` /
+        # ``assistant_turn_ms`` (event-driven only) nor reset ``_last_tick_ms``
+        # (which would shrink the dt observed by the next real event).
+        # The staleness override below STILL fires because it reads
+        # ``self.user.last_updated_ms`` (an event-driven timestamp), not
+        # ``_last_tick_ms``.
+        self.runtime.tick(int(time.time() * 1000), accumulate_dt=False)
         return {
             "user": self.runtime.user.to_dict(),
             "conversation": self.runtime.conversation.to_dict(),
