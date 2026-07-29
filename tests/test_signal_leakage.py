@@ -224,55 +224,27 @@ def sample_character_path() -> Path:
     return p
 
 
-def _orchestrator_factory(
-    sample_character_path: Path, renderer: str, monkeypatch: pytest.MonkeyPatch
-) -> DemoOrchestrator:
-    """Build an orchestrator with the buggy upstream ``reaction_delay``
-    neutralized.
-
-    Workaround note: ``policy.tick`` calls ``reaction_delay(self.mode,
-    self.config)`` passing the ``AppConfig`` itself, but
-    ``smoothing.reaction_delay`` expects ``self.config.affect.reaction_delay_ms``
-    (i.e. a :class:`ReactionDelayConfig`). See
-    ``packages/hermes_avatar/affect/policy.py:156`` vs
-    ``packages/hermes_avatar/affect/smoothing.py:74``. We stub the helper
-    with a deterministic ``lambda mode, delays: 0`` so the
-    apply_event/consume/tick path returns a clean ``AvatarBehaviorState``
-    without raising. The signal-leakage invariant this test guards does
-    NOT involve ``reaction_delay``; this monkey-patch is purely to keep
-    the orchestrator reachable. A separate fix is filed in the followups.
-    """
-    # Patch on the *importing* module (``policy.py``) because it binds
-    # ``reaction_delay`` at module load via ``from .smoothing import reaction_delay``.
-    # Patching the source module alone (``smoothing.reaction_delay``) leaves the
-    # alias inside policy.py unchanged and the test still raises.
-    monkeypatch.setattr(
-        "hermes_avatar.affect.policy.reaction_delay",
-        lambda mode, delays: 0,
-    )
+@pytest.fixture
+def livetalking_orchestrator(sample_character_path: Path) -> DemoOrchestrator:
+    """A wired-up orchestrator using the LiveTalking renderer adapter
+    (HTTP, no real daemon reachable in CI — degrades to passthrough) plus
+    NoopVoiceAdapter so we exercise the full event-handling path."""
     return DemoOrchestrator(
         character=str(sample_character_path),
-        renderer=renderer,
+        renderer="livetalking",
         voice_backend="none",
         agent_mode="fake",
     )
 
 
 @pytest.fixture
-def livetalking_orchestrator(
-    sample_character_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> DemoOrchestrator:
-    """A wired-up orchestrator using the LiveTalking renderer adapter
-    (HTTP, no real daemon reachable in CI — degrades to passthrough) plus
-    NoopVoiceAdapter so we exercise the full event-handling path."""
-    return _orchestrator_factory(sample_character_path, "livetalking", monkeypatch)
-
-
-@pytest.fixture
-def facefusion_orchestrator(
-    sample_character_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> DemoOrchestrator:
-    return _orchestrator_factory(sample_character_path, "facefusion", monkeypatch)
+def facefusion_orchestrator(sample_character_path: Path) -> DemoOrchestrator:
+    return DemoOrchestrator(
+        character=str(sample_character_path),
+        renderer="facefusion",
+        voice_backend="none",
+        agent_mode="fake",
+    )
 
 
 # ---------------------------------------------------------------------------

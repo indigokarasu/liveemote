@@ -150,10 +150,10 @@ class AffectRuntime:
             self.avatar.full_body_pose = "attentive_lean"
         elif self.conversation.turn_state == "assistant_thinking":
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="thinking", affect=affect, gaze_target=self.user.gaze_direction, emote_id=self.emote_lookup("thinking"), intensity=intensity, delay_ms=reaction_delay(self.mode, self.config), full_body_pose="thinking_shift")
+            self.avatar = AvatarBehaviorState(mode="thinking", affect=affect, gaze_target=self.user.gaze_direction, emote_id=self.emote_lookup("thinking"), intensity=intensity, delay_ms=reaction_delay(self.mode, self.config.affect.reaction_delay_ms), full_body_pose="thinking_shift")
         else:
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="idle", affect=affect, gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward", emote_id=self.emote_lookup("neutral"), intensity=intensity, mirror_strength=self.config.behavior.mirroring_strength if self.mode == "mirror" else 0.0, delay_ms=reaction_delay(self.mode, self.config))
+            self.avatar = AvatarBehaviorState(mode="idle", affect=affect, gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward", emote_id=self.emote_lookup("neutral"), intensity=intensity, mirror_strength=self.config.behavior.mirroring_strength if self.mode == "mirror" else 0.0, delay_ms=reaction_delay(self.mode, self.config.affect.reaction_delay_ms))
         return self.avatar
 
     def set_mode(self, mode: str) -> None:
