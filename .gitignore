@@ -17,3 +17,8 @@ character_input/emotes/**/*.mp4
 character_input/emotes/**/*.mov
 character_input/emotes/**/*.webm
 .DS_Store
+
+# Sandbox-only scratch artifacts from local daemon/IPC debugging. Any pulse,
+# log, or pid-file written by a transient uvicorn / sidecar invocation should
+# land here so it doesn't pollute `git status` between commits.
+tests/_artifacts/
