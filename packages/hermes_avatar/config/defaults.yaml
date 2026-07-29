@@ -1,6 +1,12 @@
 affect:
   update_hz: 30
   min_emote_dwell_ms: 1200
+  # Ambient-after threshold: when (now_ms - last_perception_ms) exceeds this,
+  # AffectRuntime.tick() swaps the avatar into mode="recovering" so the
+  # browser plays the subtle CSS ambient loop instead of freezing on the
+  # last drawn state. 0 disables the ambient fallback entirely.
+  # Override with AFFECT__AMBIENT_AFTER_MS=<ms>.
+  ambient_after_ms: 1500
   reaction_delay_ms:
     mirror_min: 250
     mirror_max: 900

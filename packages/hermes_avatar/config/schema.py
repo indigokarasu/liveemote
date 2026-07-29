@@ -43,6 +43,24 @@ class ReactionDelayConfig(BaseModel):
 class AffectConfig(BaseModel):
     update_hz: int = 30
     min_emote_dwell_ms: int = 1200
+    # Staleness threshold for the ambient-recovery fallback. When the gap
+    # between ``now_ms`` and the last perception/audio event exceeds this
+    # value, :meth:`AffectRuntime.tick` flips the avatar into
+    # ``mode="recovering"`` so the browser plays a subtle CSS ambient loop
+    # instead of freezing on the last user-driven state. ``0`` disables the
+    # ambient fallback (the avatar will simply stay in whatever mode it
+    # was rendering when signal was lost). Default 1500ms ≈ 5 missed
+    # 320 ms perception polls. Override via ``AFFECT__AMBIENT_AFTER_MS``
+    # which the env-overlay loader in :func:`load_config` already handles.
+    ambient_after_ms: int = 1500
+
+    @field_validator("ambient_after_ms")
+    @classmethod
+    def check_ambient_after_ms_non_negative(cls, v):
+        if v < 0:
+            raise ValueError("ambient_after_ms must be >= 0 (0 disables fallback)")
+        return v
+
     reaction_delay_ms: ReactionDelayConfig = Field(default_factory=ReactionDelayConfig)
     smoothing: SmoothingConfig = Field(default_factory=SmoothingConfig)
 

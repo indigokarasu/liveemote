@@ -132,14 +132,36 @@ class AffectRuntime:
                 self.conversation.turn_state = "assistant_thinking"
         self.user.last_updated_ms = now
 
-    def tick(self, timestamp_ms: int | None = None) -> AvatarBehaviorState:
+    def tick(
+        self,
+        timestamp_ms: int | None = None,
+        *,
+        accumulate_dt: bool = True,
+    ) -> AvatarBehaviorState:
+        """Recompute ``self.avatar`` for the current moment and return it.
+
+        ``accumulate_dt`` (default ``True``) gates whether this tick is allowed
+        to advance the conversation-turn timers (``user_turn_ms`` /
+        ``assistant_turn_ms``) and reset ``_last_tick_ms``. The default
+        ``True`` keeps the historical contract for event-driven callers
+        (``consume``, ``speak_test``, ``set_policy_mode``, ``trigger``). Pass
+        ``accumulate_dt=False`` for bookkeeping-only ticks that must NOT
+        reflect artifact drift into the conversation-state payload - this is
+        what :meth:`DemoOrchestrator.status` does on every 1.5 s browser
+        poll, so the conversation timers stay event-driven instead of
+        compounding on every heartbeat. The staleness override below still
+        fires under ``accumulate_dt=False`` because it reads
+        ``self.user.last_updated_ms`` (event-driven timestamp), not
+        ``_last_tick_ms``.
+        """
         now = timestamp_ms or self._now()
-        dt = max(0, now - self._last_tick_ms)
-        self._last_tick_ms = now
-        if self.conversation.turn_state == "user_speaking":
-            self.conversation.user_turn_ms += dt
-        elif self.conversation.turn_state == "assistant_speaking":
-            self.conversation.assistant_turn_ms += dt
+        if accumulate_dt:
+            dt = max(0, now - self._last_tick_ms)
+            self._last_tick_ms = now
+            if self.conversation.turn_state == "user_speaking":
+                self.conversation.user_turn_ms += dt
+            elif self.conversation.turn_state == "assistant_speaking":
+                self.conversation.assistant_turn_ms += dt
         self.conversation.tension = self.user.tension
         self.conversation.interruption_risk = interruption_risk(self.user, self.conversation)
         if self.conversation.turn_state == "assistant_speaking":
@@ -154,6 +176,43 @@ class AffectRuntime:
         else:
             affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
             self.avatar = AvatarBehaviorState(mode="idle", affect=affect, gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward", emote_id=self.emote_lookup("neutral"), intensity=intensity, mirror_strength=self.config.behavior.mirroring_strength if self.mode == "mirror" else 0.0, delay_ms=reaction_delay(self.mode, self.config.affect.reaction_delay_ms))
+        # Ambient-recovery override --------------------------------------
+        # When the perception stream has gone silent for longer than the
+        # configured ambient threshold, snap the avatar into ``mode="recovering"``
+        # so the browser's CSS ambient loop fires (see
+        # ``apps/demo_server/static/demo.css`` ``.mode-recovering``). Without this,
+        # the avatar would simply freeze on whatever ``mode``/``intensity`` it
+        # happened to be emitting when the user's webcam disconnected - the
+        # exact "pausing or freezing on its last drawn state" feel the user
+        # wants to avoid.
+        #
+        # Three deliberate invariants:
+        #   * ``self.user.last_updated_ms > 0`` keeps us out of the ambient
+        #     path on first boot (no perception event yet = not a loss, just
+        #     silence pending). Without this guard a cold-started server
+        #     would flip to ambient before its first ever frame landed.
+        #   * ``self.config.affect.ambient_after_ms > 0`` is the configured
+        #     opt-out (``AFFECT__AMBIENT_AFTER_MS=0`` keeps the legacy
+        #     freeze-on-last behaviour).
+        #   * ``mirror_strength = 0.0`` and ``emote_id = self.emote_lookup("neutral")``
+        #     preserve the project's headline signal-leakage invariant: the
+        #     ambient branch never carries webcam-derived state into the
+        #     avatar.
+        if (
+            self.config.affect.ambient_after_ms > 0
+            and self.user.last_updated_ms > 0
+            and (now - self.user.last_updated_ms) > self.config.affect.ambient_after_ms
+        ):
+            self.avatar.mode = "recovering"
+            # Damp the existing intensity down so the CSS keyframes drive the
+            # visible motion regardless of the last user-driven amplitude.
+            self.avatar.intensity = min(self.avatar.intensity, 0.10)
+            self.avatar.gaze_target = "soft_forward"
+            self.avatar.mirror_strength = 0.0
+            neutral = self.emote_lookup("neutral")
+            if neutral is not None:
+                self.avatar.emote_id = neutral
+            self.avatar.full_body_pose = "standing_idle"
         return self.avatar
 
     def set_mode(self, mode: str) -> None:

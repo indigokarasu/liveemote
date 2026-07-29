@@ -398,3 +398,55 @@ def test_face_swap_source_face_is_character_asset_path(
             f"to a real on-disk character asset; the avatar side is using "
             f"something other than the character's training_references."
         )
+
+
+def test_status_under_ambient_recovering_no_pixel_leak(
+    livetalking_orchestrator: DemoOrchestrator,
+) -> None:
+    """Regression: when signal goes silent for longer than
+    ``affect.ambient_after_ms`` the runtime flips ``avatar.mode`` to
+    ``"recovering"`` so the browser plays the subtle CSS ambient loop
+    instead of freezing on its last drawn state. The recovery branch
+    must continue to satisfy the project's headline invariant: webcam
+    pixels never reach the avatar side, even when the runtime IS
+    actively re-emitting state under fallback.
+
+    Strategy: land one perception event so ``user.last_updated_ms`` is
+    set, then rewind it 5 s into the past to fake a stale frame. The
+    orchestrator's ``status()`` heartbeat call (added alongside this
+    feature) will then tick with ``(now - last_updated_ms) >> ambient_after_ms``
+    and flip ``mode`` to ``"recovering"`` automatically.
+    """
+    orch = livetalking_orchestrator
+    # 1. land one real perception event so the runtime has seen a signal.
+    orch.apply_event(SENTINEL_PERCEPTION_EVENT)
+    # 2. force a 5 s staleness gap. The orchestrator.status() heartbeat
+    #    will now trigger the ambient-recovery override in runtime.tick().
+    orch.runtime.user.last_updated_ms -= 5_000
+    # 3. status() tick-reads via the heartbeat and returns the ambient state.
+    snap = orch.status()
+    assert snap["avatar"]["mode"] == "recovering", (
+        f"expected avatar.mode='recovering' under 5 s staleness gap, "
+        f"got {snap['avatar']['mode']!r}; is the orchestrator status() "
+        f"heartbeat tick + ambient_after_ms wiring intact?"
+    )
+    # Strength assertions — the ambient branch must be the calm preset
+    # so the CSS keyframes can drive the visible motion regardless of
+    # where the user was just before signal dropped.
+    avatar = snap["avatar"]
+    assert avatar["intensity"] <= 0.10
+    assert avatar["mirror_strength"] == 0.0
+    assert avatar["gaze_target"] == "soft_forward"
+    assert avatar["full_body_pose"] == "standing_idle"
+    # 4. Walk the full status() payload — no pixel bytes anywhere.
+    offenders = walk_state_for_leaked_pixels(snap, "status_under_ambient")
+    assert offenders == [], (
+        f"webcam-derived pixels leaked into status() under ambient "
+        f"recovery at: {offenders}"
+    )
+    # 5. Walk the runtime itself too — catches debug attributes that
+    #    might be added in future refactors.
+    offenders_rt = walk_state_for_leaked_pixels(
+        orch.runtime, "runtime_under_ambient",
+    )
+    assert offenders_rt == [], offenders_rt

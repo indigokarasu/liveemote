@@ -566,3 +566,168 @@ def _extract_property_target(line: str) -> str:
     if not m:
         return ""
     return m.group(1)
+
+
+# ---------------------------------------------------------------------------
+# Ambient-recovery CSS guard
+# ---------------------------------------------------------------------------
+# When the AffectRuntime ambient-recovery override fires (see
+# ``packages/hermes_avatar/affect/policy.py`` ``tick()``), ``avatar.mode``
+# flips to ``"recovering"`` and the browser-side ``renderAvatar`` in
+# ``demo.js`` propagates that as ``.mode-recovering`` on the avatar
+# container. The existing CSS already desaturates the avatar
+# (``filter: grayscale(.4) brightness(.9)``) but does NOT add motion.
+# Without an animation binding under ``.mode-recovering``, the avatar
+# would either sit still at low saturation (the very "frozen on last
+# state" the user wants to avoid) or just freeze on whatever CSS
+# animation ``mode=idle`` happens to be carrying. The fix lives in
+# ``apps/demo_server/static/demo.css`` as three independent
+# ``@keyframes avatar-ambient-*`` declarations.
+#
+# This regression-locks that contract. If someone deletes the
+# keyframes, or rebinds ``.mode-recovering`` to the legacy filter-only
+# rule, the test fails loudly.
+DEMO_CSS_PATH = REPO_ROOT / "apps" / "demo_server" / "static" / "demo.css"
+
+
+def test_ambient_recovering_keyframes_are_defined_and_bound() -> None:
+    """Structural guard: ``demo.css`` must declare all three
+    ``@keyframes avatar-ambient-*`` animations AND bind at least one of
+    them under the ``#avatarCanvas.mode-recovering`` selector.
+
+    Together with the runtime tick-override test
+    (``tests/test_affect_ambient.py``), this proves the full feature
+    path drives visible motion instead of a frozen portrait.
+    """
+    if not DEMO_CSS_PATH.is_file():
+        pytest.skip(
+            f"demo.css not found at {DEMO_CSS_PATH}; project template "
+            f"always ships it, but sandbox may have stripped it."
+        )
+    css = DEMO_CSS_PATH.read_text()
+    css_stripped = _strip_strings_and_comments(css)
+
+    # 1. The three keyframes that drive the ambient loop must be defined.
+    for kf in (
+        "@keyframes avatar-ambient-breath",
+        "@keyframes avatar-ambient-sway",
+        "@keyframes avatar-ambient-blink-slow",
+    ):
+        assert kf in css_stripped, (
+            f"missing keyframe `{kf}` in demo.css; without it the "
+            f"avatar would freeze on its last drawn state whenever the "
+            f"user's webcam signal goes silent."
+        )
+
+    # 2. At least one CSS rule must SELECT ``#avatarCanvas.mode-recovering``
+    #    AND reference ``avatar-ambient-*`` inside its body. We use a
+    #    rule-extracting regex (any selector text up to ``mode-recovering``
+    #    followed by the rule body braces) so this is robust against
+    #    descendant selectors (``...mode-recovering #avatarPortrait{...}``)
+    #    and composite ``animation: avatar-ambient-a, avatar-ambient-b``.
+    rule_pattern = re.compile(
+        r"(?P<rule>[^{}]*?#avatarCanvas\s*\.\s*mode-recovering"
+        r"[^{}]*?)\{(?P<body>[^{}]*)\}"
+    )
+    binding_rules = [
+        m.group("rule") + "{" + m.group("body") + "}"
+        for m in rule_pattern.finditer(css_stripped)
+        if "avatar-ambient-" in m.group("body")
+    ]
+    assert binding_rules, (
+        "CSS has avatar-ambient-* keyframes defined but no selector "
+        "under #avatarCanvas.mode-recovering is binding them. Without "
+        "this binding the avatar remains frozen on its last drawn "
+        "state when perception events stop arriving."
+    )
+
+
+def test_demo_js_avatar_classname_is_template_driven_by_a_mode(
+    demo_js_src: str,
+) -> None:
+    """T1 — Structural guard pinning the demo.js client's mode flow.
+
+    The entire ambient-recovery feature depends on the browser correctly
+    translating ``avatar.mode === "recovering"`` into a ``mode-recovering``
+    className on ``#avatarCanvas``. If a future refactor replaces the
+    template interpolation ``mode-${a.mode}`` with a hard-coded string,
+    a one-time render, or removes the second-token className entirely,
+    the CSS keyframes for the ambient fallback stop firing and the user
+    sees the original "frozen-on-last-state" bug back. We pin:
+
+      1. Some assignment to ``avatar.className`` (or ``els.avatar.className``)
+         must interpolate a value containing a ``mode`` identifier into
+         a ``mode-${...}`` template literal. This is the dynamic flow.
+      2. There must NOT be any hard-coded ``"mode-recovering"`` /
+         ``'mode-recovering'`` string in demo.js — that would mean somebody
+         stubbed out the interpolation with a static recovery class,
+         bypassing the runtime entirely.
+
+    Both patterns must be checked against the RAW source string
+    ``demo_js_src``. The local ``_strip_strings_and_comments`` helper
+    blanks every string literal - including the very template literals
+    that ARE the structural evidence we need - so a search against the
+    stripped form is guaranteed to come up empty. ``demo_js_src`` is
+    taken as a pytest parameter so the fixture value (the raw JS
+    string) is resolved instead of the fixture function object.
+    """
+    # 1) template-driven classname \u2014 search the RAW source so the
+    #    template literal ``mode-${a.mode || 'idle'}`` is preserved.
+    raw_match = re.search(
+        r"\.className\s*=[^;\n]*mode-\$\{",
+        demo_js_src,
+    )
+    assert raw_match, (
+        "demo.js must build the avatar.className dynamically from a "
+        "template literal that injects `mode-${...}` (a stub or static "
+        "class assignment would silently break the entire "
+        ".mode-recovering CSS ambient loop)."
+    )
+    # 2) no hard-coded recovery classname \u2014 also raw source.
+    assert (
+        '"mode-recovering"' not in demo_js_src
+        and "'mode-recovering'" not in demo_js_src
+    ), (
+        "demo.js contains a hard-coded 'mode-recovering' className; "
+        "the recovery mode must flow through the runtime, not be "
+        "sidestepped via a hard-coded browser class."
+    )
+
+
+def test_ambient_recovering_binding_is_multiple_keyframes() -> None:
+    """Regression guard (parametrize-friendly): a real ambient animation
+    composes at least two of the new keyframes on different children
+    (canvas OR face OR portrait) so the motion feels layered, not
+    mechanical. A regression that only binds ONE of the elements
+    (e.g. someone refactors to attach just the breath to ``#avatarPortrait``
+    and drops sway on the face) raises the visually-mechanical concern
+    the user flagged originally.
+    """
+    css = DEMO_CSS_PATH.read_text()
+    css_stripped = _strip_strings_and_comments(css)
+    # Pull every CSS rule that selects ``#avatarCanvas.mode-recovering``
+    # and bind ``avatar-ambient-*`` in the body. Count the DISTINCT
+    # anchor targets each rule attaches to (.avatar-portrait /
+    # .avatar-face / #avatarPortrait / #avatarEmote). >=2 means the
+    # ambient motion is spread across multiple visual elements.
+    rule_pattern = re.compile(
+        r"(?P<rule>[^{}]*?#avatarCanvas\s*\.\s*mode-recovering"
+        r"[^{}]*?)\{(?P<body>[^{}]*)\}"
+    )
+    ambient_targets = set()
+    for m in rule_pattern.finditer(css_stripped):
+        if "avatar-ambient-" in m.group("body"):
+            # Extract the LAST selector token before the opening brace
+            # — that's the element the animation actually targets.
+            selectors = re.findall(
+                r"(#[A-Za-z_-][\w-]*|\.[A-Za-z_-][\w-]*)",
+                m.group("rule"),
+            )
+            if selectors:
+                ambient_targets.add(selectors[-1])
+    assert len(ambient_targets) >= 2, (
+        f"expected >=2 distinct elements under .mode-recovering to "
+        f"carry avatar-ambient-* animations (got {sorted(ambient_targets)}); "
+        f"the ambient loop should compose two timelines to avoid "
+        f"feeling mechanical."
+    )
