@@ -12,11 +12,13 @@ dependencies = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.6", "p
 [project.optional-dependencies]
 perception = ["opencv-python>=4.9", "mediapipe>=0.10", "webrtcvad>=2.0.10", "sounddevice>=0.4"]
 voice = ["elevenlabs>=1.0"]
-test = ["pytest>=8.0", "hypothesis", "pytest-asyncio"]
+test = ["pytest>=8.0", "hypothesis", "pytest-asyncio", "playwright>=1.40"]
+
 
 [tool.setuptools.packages.find]
 where = ["packages", "."]
 include = ["hermes_avatar*", "apps*"]
+
 
 [tool.pytest.ini_options]
 pythonpath = ["packages", "."]
@@ -25,4 +27,6 @@ asyncio_mode = "auto"
 markers = [
     "performance: performance or benchmark tests (not run in the default CI suite)",
     "gpu: tests that require a CUDA host and physical GPU (skipped on CPU-only sandboxes)",
-] 
+    "browser: tests that require a headless Chromium binary (auto-skipped on thin CI images via tests/test_signal_leakage_browser_runtime.py)",
+]
+   
