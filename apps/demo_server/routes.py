@@ -284,15 +284,56 @@ def build_router(static_dir: str) -> APIRouter:
             components["renderer"] = {"status": "degraded", "detail": {"error": str(exc)}}
         mark(components["renderer"]["status"])
 
-        # --- voice backend ---
+        # --- voice backend (LuxtTSAdapter / ElevenLabsAdapter / NoopVoiceAdapter) ---
+        # Surface ``circuit_breaker`` so operators can monitor the voice
+        # vendor breaker state alongside the renderer + protocol-agent
+        # breakers. Read fresh on every call so reload_config() rebuilds
+        # of orchestrator.voice are reflected immediately.
         try:
+            voice_caps = (
+                orchestrator.voice.capability_status()
+                if hasattr(orchestrator.voice, "capability_status")
+                else {}
+            )
             components["voice_backend"] = {
                 "status": "ok",
-                "detail": {"name": orchestrator.voice_backend_name},
+                "detail": {
+                    "name": orchestrator.voice_backend_name,
+                    "circuit_breaker": voice_caps.get("circuit_breaker"),
+                },
             }
         except Exception as exc:
             components["voice_backend"] = {"status": "degraded", "detail": {"error": str(exc)}}
         mark(components["voice_backend"]["status"])
+
+        # --- protocol agent (LLM/cognition subsystem) ---
+        # Surfaces the OpenAI-compatible adapter's breaker + retry
+        # counters so operators can monitor LLM health. The bridge
+        # exposes circuit_breaker + retry at the top level when its
+        # mode is openai-compatible; for other modes (offline / fake /
+        # external) we surface mode + last_error only. All probes are
+        # wrapped so the endpoint stays 200 even when the agent is
+        # unconfigured or mis-wired.
+        try:
+            agent_caps = (
+                orchestrator.agent.capability_status()
+                if hasattr(orchestrator.agent, "capability_status")
+                else {}
+            )
+            components["protocol_agent"] = {
+                "status": "ok" if agent_caps.get("available", False) else "degraded",
+                "detail": {
+                    "mode": agent_caps.get("mode", "unknown"),
+                    "harness": agent_caps.get("harness"),
+                    "url_configured": agent_caps.get("url_configured", False),
+                    "circuit_breaker": agent_caps.get("circuit_breaker"),
+                    "retry": agent_caps.get("retry"),
+                    "last_error": agent_caps.get("last_error"),
+                },
+            }
+        except Exception as exc:
+            components["protocol_agent"] = {"status": "degraded", "detail": {"error": str(exc)}}
+        mark(components["protocol_agent"]["status"])
 
         # --- character catalog ---
         try:

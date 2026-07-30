@@ -30,6 +30,7 @@ user is expected to set those in the Freebuff API Keys panel.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -41,6 +42,11 @@ import httpx
 
 from .agent_bridge import AgentResponse
 from hermes_avatar.affect.state import UserAffectState
+from hermes_avatar.util import (
+    CircuitBreaker,
+    compute_backoff_delay,
+    is_retryable_error,
+)
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +62,17 @@ class AdapterConfig:
     model: str = DEFAULT_MODEL
     timeout_s: float = DEFAULT_TIMEOUT_S
     extra_headers: dict[str, str] = field(default_factory=dict)
+    # Retry configuration (item 2.2). ``max_retries=2`` means up to 3 total
+    # attempts per user-request (1 initial + 2 retries). Backoff uses the
+    # shared ``compute_backoff_delay`` so far-future tuning happens in one
+    # place. A 5xx / 429 / network-blip retry avoids round-tripping through
+    # the breaker for short transient issues; the breaker still catches the
+    # sustained outage through ``record_failure()`` *once* per user-request
+    # when ALL retries are exhausted (or a non-retryable error short-circuits).
+    max_retries: int = 2
+    retry_base_delay: float = 0.5
+    retry_max_delay: float = 4.0
+    retry_jitter_factor: float = 0.1
 
     def is_configured(self) -> bool:
         return bool(self.api_key) and bool(self.base_url)
@@ -147,6 +164,22 @@ class OpenAICompatibleAdapter:
         self.last_error: str | None = None
         self.last_latency_ms: int | None = None
         self.last_model: str = self.config.model
+        # Retry counters -- surfaced via capability_status() so the demo
+        # server's /api/health can report how aggressively this adapter is
+        # retrying under load. ``last_retry_count`` resets each user-request,
+        # ``total_retries`` is cumulative since adapter init.
+        self.last_retry_count: int = 0
+        self.total_retries: int = 0
+        # Circuit breaker protects the avatar's LLM call stream from
+        # cascading vendor outages. 3 consecutive failures / 30s open
+        # window is more tolerant than LuxTTS=2 / 60s because HTTP 429/5xx
+        # storms are common in real chat-completions endpoints and external
+        # HTTP vendors typically self-recover in seconds rather than
+        # minutes. Trip catches ALL exception paths (HTTPStatusError,
+        # network errors, JSON parse failures) -- preventing model-spam
+        # loops on bad keys / broken integration pairs (e.g. 401/404),
+        # matching LuxTTS's except-Exception simplicity.
+        self.cb = CircuitBreaker(failure_threshold=3, open_timeout=30.0, name="openai")
 
     def is_configured(self) -> bool:
         return self.config.is_configured()
@@ -159,6 +192,19 @@ class OpenAICompatibleAdapter:
             "model": self.config.model,
             "last_latency_ms": self.last_latency_ms,
             "last_error": self.last_error,
+            "circuit_breaker": self.cb.snapshot(),
+            # Retry behaviour surface for /api/health monitoring. Operators
+            # can spot a vendor in flap mode (``last_retry_count`` near
+            # ``max_retries``) or chronically noisy (``total_retries`` large).
+            "retry": {
+                "max_retries": self.config.max_retries,
+                "base_delay": self.config.retry_base_delay,
+                "max_delay": self.config.retry_max_delay,
+                "jitter_factor": self.config.retry_jitter_factor,
+                "last_retry_count": self.last_retry_count,
+                "total_retries": self.total_retries,
+                "retry_via": "compute_backoff_delay + is_retryable_error",
+            },
         }
 
     async def generate_response(
@@ -168,27 +214,99 @@ class OpenAICompatibleAdapter:
             self.last_error = "OPENAI_COMPATIBLE_API_KEY not set"
             return AgentResponse(text="", tags={}, source="offline")
 
-        payload = self._build_payload(user_text, affect_state)
-        try:
-            async with httpx.AsyncClient(timeout=self.config.timeout_s) as client:
-                response = await client.post(
-                    f"{self.config.base_url}/v1/chat/completions",
-                    headers={
-                        "authorization": f"Bearer {self.config.api_key}",
-                        "content-type": "application/json",
-                        **self.config.extra_headers,
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as exc:
-            self.last_error = f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            log.warning("openai_compatible HTTP error: %s", self.last_error)
+        # Circuit-breaker gate (after is_configured, before any HTTP).
+        # The breaker measures BACKEND HEALTH, not user config status --
+        # unconfigured callers fall through to offline mode WITHOUT
+        # touching the breaker at all. On OPEN we emit the same offline
+        # AgentResponse shape the existing except arms return -- the demo
+        # contract that offline-mode mirroring/reflecting continues to
+        # work during a vendor outage stays intact.
+        if not self.cb.allow():
+            self.last_error = "openai circuit breaker open"
+            log.warning(
+                "openai circuit breaker open; emit offline agent response",
+                extra={"audit": {"event": "openai.cb_open"}},
+            )
             return AgentResponse(text="", tags={}, source="offline")
-        except Exception as exc:
-            self.last_error = str(exc)
-            log.warning("openai_compatible request failed: %s", self.last_error)
+
+        payload = self._build_payload(user_text, affect_state)
+        # Reset per-user-request counter so ``last_retry_count`` reflects
+        # the LAST completed request, not a moving sum.
+        self.last_retry_count = 0
+        # Retry loop (item 2.2). The breaker gate above guarantees we only
+        # enter this loop while CLOSED or HALF_OPEN-probing. Each iteration:
+        #   - on success: record_success() + break out
+        #   - on retryable transient error + attempts left: sleep with
+        #     exponential backoff, retry
+        #   - on retryable transient error + exhausted: break out
+        #   - on non-retryable error (401/403/404/JSON parse fails on 200):
+        #     break out immediately (no point burning retries on a doomed call)
+        # After the loop we record the breaker outcome ONCE per user-request so
+        # a 3-attempt failure counts as a single breaker event, not three --
+        # this is the explicit user spec for retry+breaker composition.
+        last_exc: Exception | None = None
+        data: dict[str, Any] | None = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.config.timeout_s) as client:
+                    response = await client.post(
+                        f"{self.config.base_url}/v1/chat/completions",
+                        headers={
+                            "authorization": f"Bearer {self.config.api_key}",
+                            "content-type": "application/json",
+                            **self.config.extra_headers,
+                        },
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                self.cb.record_success()
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                # Last attempt: stop the loop here so we fall through to
+                # the post-loop error path.
+                if attempt == self.config.max_retries:
+                    break
+                # Non-retryable error: stop immediately. ``is_retryable_error``
+                # returns False on 401/403/404 and on JSON parse failures
+                # (since their message lacks the retryable-keyword substring
+                # set), so 4xx and bad-shape responses don't burn retries.
+                if not is_retryable_error(exc):
+                    break
+                # Retry-able and not last attempt: exponential backoff with
+                # jitter, then loop. Counters tick ONCE per retry decision
+                # so a 2-retry sequence lands at last_retry_count=2.
+                self.last_retry_count += 1
+                self.total_retries += 1
+                delay = compute_backoff_delay(
+                    attempt,
+                    self.config.retry_base_delay,
+                    self.config.retry_max_delay,
+                    self.config.retry_jitter_factor,
+                )
+                await asyncio.sleep(delay)
+
+        if last_exc is not None:
+            self.cb.record_failure()
+            if isinstance(last_exc, httpx.HTTPStatusError):
+                self.last_error = (
+                    f"HTTP {last_exc.response.status_code}: "
+                    f"{last_exc.response.text[:200]}"
+                )
+                log.warning(
+                    "openai_compatible HTTP error after retries: %s",
+                    self.last_error,
+                    extra={"audit": {"event": "openai.http_error", "status_code": last_exc.response.status_code}},
+                )
+            else:
+                self.last_error = str(last_exc)
+                log.warning(
+                    "openai_compatible request failed after retries: %s",
+                    self.last_error,
+                    extra={"audit": {"event": "openai.request_failed", "error": str(last_exc)}},
+                )
             return AgentResponse(text="", tags={}, source="offline")
 
         self.last_error = None
