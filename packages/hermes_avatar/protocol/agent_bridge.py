@@ -124,6 +124,29 @@ class AgentBridge:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.last_error: str | None = None
+        # Stable OpenAI-compatible adapter instance, lifecycle-managed.
+        # Stores breaker + retry state across calls (otherwise each
+        # fresh adapter construction wipes the counters and the
+        # `circuit_breaker` snapshot reported in /api/health). Only
+        # instantiated when the bridge mode actually targets an
+        # OpenAI-compatible endpoint -- offline / fake / external
+        # modes get None here.
+        self.adapter: OpenAICompatibleAdapter | None = None
+        if self.mode in OPENAI_COMPATIBLE_MODES:
+            # LAZY import: avoid the openai_adapter <-> agent_bridge
+            # circular-import cycle by deferring the adapter import
+            # to instantiation time (both modules are fully loaded by
+            # then, in the order the caller / orchestrator drives).
+            from .openai_adapter import AdapterConfig, OpenAICompatibleAdapter
+            self.adapter = OpenAICompatibleAdapter(AdapterConfig(
+                api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY"),
+                base_url=os.getenv(
+                    "OPENAI_COMPATIBLE_BASE_URL",
+                    base_url,
+                ).rstrip("/"),
+                model=os.getenv("OPENAI_COMPATIBLE_MODEL", model),
+                timeout_s=float(os.getenv("OPENAI_COMPATIBLE_TIMEOUT_S", "20")),
+            ))
 
     @property
     def available(self) -> bool:
@@ -141,6 +164,19 @@ class AgentBridge:
         if self.mode in OPENAI_COMPATIBLE_MODES:
             status["base_url"] = self.base_url
             status["model"] = self.model
+            # Surface the OpenAI-compatible adapter's resilience surface
+            # so the demo_server /api/health can monitor circuit_breaker
+            # state and retry counter without traversing the inner 
+            # adapter reference. ``self.adapter`` is lifecycle-managed.
+            if self.adapter is not None:
+                adapter_status = self.adapter.capability_status()
+                status["circuit_breaker"] = adapter_status.get("circuit_breaker")
+                status["retry"] = adapter_status.get("retry")
+                status["adapter"] = {
+                    "configured": adapter_status.get("configured", False),
+                    "base_url": adapter_status.get("base_url"),
+                    "model": adapter_status.get("model"),
+                }
         return status
 
     # -- dispatch ----------------------------------------------------------
@@ -168,85 +204,18 @@ class AgentBridge:
     async def _openai_compatible(
         self, user_text: str, affect_state: UserAffectState
     ) -> AgentResponse:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            self.last_error = "OPENAI_API_KEY not set"
+        # Delegate to the lifecycle-managed OpenAICompatibleAdapter so
+        # the breaker + retry counters accumulate across calls instead of
+        # being re-zeroed on every generate_response invocation.
+        if self.adapter is None:
+            self.last_error = "openai-compatible adapter not initialized for this mode"
             return AgentResponse(text="", tags={}, source="offline")
+        response = await self.adapter.generate_response(user_text, affect_state)
+        # Mirror the adapter's last_error so the AgentBridge surface stays
+        # consistent for callers reading orchestrator.agent.last_error.
+        self.last_error = self.adapter.last_error
+        return response
 
-        payload = {
-            "model": self.model,
-            "temperature": 0.6,
-            "max_tokens": 220,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"user_text: {user_text or '<silent>'}\n"
-                        f"user_affect: {json.dumps(affect_state.to_dict())}"
-                    ),
-                },
-            ],
-        }
-        try:
-            payload["response_format"] = {"type": "json_object"}
-        except Exception:
-            pass
-
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.post(
-                    f"{self.base_url}/v1/chat/completions",
-                    headers={
-                        "authorization": f"Bearer {api_key}",
-                        "content-type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as exc:
-            self.last_error = (
-                f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            )
-            log.warning("openai-compatible HTTP error: %s", self.last_error)
-            return AgentResponse(text="", tags={}, source="offline")
-        except Exception as exc:
-            self.last_error = str(exc)
-            log.warning("openai-compatible request failed: %s", self.last_error)
-            return AgentResponse(text="", tags={}, source="offline")
-
-        self.last_error = None
-        text = self._extract_text(data)
-        parsed = _extract_json_block(text) or {}
-        spoken = str(parsed.get("text") or "").strip()
-        tags = parsed.get("tags") or {}
-        if not isinstance(tags, dict):
-            tags = {}
-        tags.setdefault("source_model", self.model)
-        tags.setdefault("source_backend", "openai-compatible")
-        tags["voice"] = _coerce_voice(tags.get("voice"))
-        if "affect" in tags and not isinstance(tags["affect"], str):
-            tags.pop("affect")
-        return AgentResponse(text=spoken, tags=tags, source="openai-compatible")
-
-    @staticmethod
-    def _extract_text(data: dict[str, Any]) -> str:
-        choices = data.get("choices") or []
-        if choices:
-            message = choices[0].get("message") or {}
-            content = message.get("content") or ""
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = [p.get("text", "") for p in content if isinstance(p, dict)]
-                return "\n".join([part for part in parts if part])
-        for key in ("text", "content", "response", "output"):
-            if isinstance(data.get(key), str):
-                return data[key]
-        return ""
-
-    # -- external agent harness (unchanged) --------------------------------
 
     async def _external(
         self, user_text: str, affect_state: UserAffectState
