@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .base import SynthesizedSpeech, VoiceBackend, VoiceStyle
 from .voice_cache import VoiceCache
+from hermes_avatar.util import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,12 @@ class LuxTTSAdapter(VoiceBackend):
         self.last_latency_ms = 0
         self.last_engine = "local-parametric"
         self.last_error: str | None = None
+        # Circuit breaker protects /api/speak from cascading 120s vendor hangs.
+        # 2 failures (4 minutes of probe time) is highly tolerant for a local
+        # subprocess; the 60s open window gives heavy model recovery time
+        # before the next probe attempt while keeping the user unblocked
+        # with parametric fallback audio in between.
+        self.cb = CircuitBreaker(failure_threshold=2, open_timeout=60.0, name="luxtts")
 
     def cache_reference(self, reference_audio: str | None) -> None:
         if reference_audio:
@@ -53,6 +60,7 @@ class LuxTTSAdapter(VoiceBackend):
             "last_engine": self.last_engine,
             "last_latency_ms": self.last_latency_ms,
             "last_error": self.last_error,
+            "circuit_breaker": self.cb.snapshot(),
         }
 
     def synthesize(self, text: str, voice_style: VoiceStyle, reference_audio: str | None = None) -> SynthesizedSpeech:
@@ -62,17 +70,32 @@ class LuxTTSAdapter(VoiceBackend):
         engine = "local-parametric"
         if not path.exists():
             if self.command_template:
-                try:
-                    self._run_vendor_command(text, path, reference_audio)
-                    engine = "luxtts-vendor"
-                    self.last_error = None
-                except Exception as exc:  # command failure should not break local demo audio
-                    self.last_error = str(exc)
+                # Gate the vendor call on the breaker FIRST. Unlike the
+                # ElevenLabs/LiveTalking adapters (which raise on open),
+                # LuxTTS is the deterministic-local fallback path so we
+                # must swallow the refusal and emit parametric audio
+                # instead — otherwise the user gets silence.
+                if not self.cb.allow():
+                    self.last_error = "luxtts circuit breaker open"
                     logger.warning(
-                        "luxtts vendor command failed; using local parametric fallback",
-                        extra={"audit": {"event": "luxtts.vendor_fallback", "error": str(exc)}},
+                        "luxtts circuit breaker open; using local parametric fallback",
+                        extra={"audit": {"event": "luxtts.cb_open"}},
                     )
                     self._write_parametric_voice(path, text, voice_style)
+                else:
+                    try:
+                        self._run_vendor_command(text, path, reference_audio)
+                        self.cb.record_success()
+                        engine = "luxtts-vendor"
+                        self.last_error = None
+                    except Exception as exc:  # command failure should not break local demo audio
+                        self.cb.record_failure()
+                        self.last_error = str(exc)
+                        logger.warning(
+                            "luxtts vendor command failed; using local parametric fallback",
+                            extra={"audit": {"event": "luxtts.vendor_fallback", "error": str(exc)}},
+                        )
+                        self._write_parametric_voice(path, text, voice_style)
             else:
                 self._write_parametric_voice(path, text, voice_style)
         duration_ms = self._wav_duration_ms(path)
