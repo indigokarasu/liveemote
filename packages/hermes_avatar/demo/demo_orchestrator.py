@@ -277,7 +277,38 @@ class DemoOrchestrator:
         response = await self.agent.generate_response(text, self.runtime.user)
         AGENT_RESPONSE_TIME.observe(time.time() - start_time)
         self.last_response_text = response.text
-        self.runtime.hermes_tags = response.tags
+        # ---- Emotion tag preprocessor (LLM tags → TTS prosody) --------
+        # Must run BEFORE the affect-runtime tick() so both the avatar's
+        # visual intensity AND the TTS prosody are derived from the same
+        # enriched values.  Without this ordering the avatar would animate
+        # at the raw LLM intensity while the voice scales it by the affect
+        # multiplier — visible as a subtle "disconnected" feel when the
+        # affect label is excited/sad/calm.
+        response_voice = response.tags.get("voice", {}) if isinstance(response.tags.get("voice", {}), dict) else {}
+        style = self.active_style()
+        style_voice = asdict(style.voice) if style is not None else {}
+        merged_voice = {**style_voice, **response_voice}
+        base_style = VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}})
+
+        emotion_result = self.emotion_processor.process(
+            response.tags,
+            response.text,
+            backend=self.voice_backend_name,
+            base_style=base_style,
+        )
+
+        # Hydrate hermes_tags with the enriched, scaled values so the
+        # avatar's speaking_behavior() reads the same intensity as the TTS.
+        self.runtime.hermes_tags = {
+            **response.tags,
+            "voice": {
+                **response.tags.get("voice", {}),
+                "pace": emotion_result.voice_style.pace,
+                "warmth": emotion_result.voice_style.warmth,
+                "intensity": emotion_result.voice_style.intensity,
+            },
+        }
+
         if not response.text:
             behavior = self.runtime.tick(int(time.time() * 1000))
             AFFECT_TICKS.inc()
@@ -288,19 +319,6 @@ class DemoOrchestrator:
         self.runtime.conversation.turn_state = "assistant_speaking"
         behavior = self.runtime.tick(int(time.time() * 1000))
         AFFECT_TICKS.inc()
-        response_voice = response.tags.get("voice", {}) if isinstance(response.tags.get("voice", {}), dict) else {}
-        style = self.active_style()
-        style_voice = asdict(style.voice) if style is not None else {}
-        merged_voice = {**style_voice, **response_voice}
-        base_style = VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}})
-
-        # ---- Emotion tag preprocessor (LLM tags → TTS prosody) --------
-        emotion_result = self.emotion_processor.process(
-            response.tags,
-            response.text,
-            backend=self.voice_backend_name,
-            base_style=base_style,
-        )
 
         speech = self.voice.synthesize(
             emotion_result.text,
