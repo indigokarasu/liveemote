@@ -11,6 +11,7 @@ from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, 
 from hermes_avatar.character.ingest import build_asset_index
 from hermes_avatar.config.schema import AppConfig, load_config, reload_config
 from hermes_avatar.demo.meeting_join import MeetingJoinService
+from hermes_avatar.perception.mediapipe_tracker import (FaceSignals, build_tracker, MediaPipeFaceTracker, NullFaceTracker)
 from hermes_avatar.protocol.agent_bridge import AgentBridge
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
 from hermes_avatar.renderer.facefusion_adapter import FaceSwapAdapter
@@ -152,6 +153,7 @@ class DemoOrchestrator:
             enabled=getattr(self.config, "wav2lip_enabled", False),
         )
         self.emotion_processor = EmotionTagProcessor()
+        self.tracker: MediaPipeFaceTracker | NullFaceTracker = build_tracker("mediapipe")
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
 
@@ -251,6 +253,17 @@ class DemoOrchestrator:
             for index in self.character_catalog.values()
         ]
 
+    def process_perception_frame(self, jpeg_b64: str, timestamp_ms: int) -> dict:
+        """Decode a browser-submitted JPEG frame into affect signals and feed the runtime."""
+        signals: FaceSignals = self.tracker.process_frame(jpeg_b64, timestamp_ms)
+        behavior = self.runtime.consume({
+            "type": "perception.frame",
+            **signals.to_dict(),
+            "timestamp_ms": timestamp_ms,
+        })
+        self.renderer.set_behavior(behavior)
+        return {"signals": signals.to_dict(), "avatar": behavior.to_dict() if hasattr(behavior, "to_dict") else {}}
+
     def capabilities(self) -> dict:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
         voice_caps = self.voice.capability_status() if hasattr(self.voice, "capability_status") else {"backend": type(self.voice).__name__}
@@ -259,6 +272,10 @@ class DemoOrchestrator:
             "renderer": renderer_caps,
             "voice": voice_caps,
             "agent": agent_caps,
+            "perception": {
+                "available": self.tracker.is_available(),
+                "backend": self.tracker.kind(),
+            },
             "mobile_layout": True,
             "multi_character_switching": True,
             "cloud_manifest_available": True,

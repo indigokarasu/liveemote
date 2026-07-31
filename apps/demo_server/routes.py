@@ -98,6 +98,10 @@ class ConfigReloadRequest(BaseModel):
     # Empty body for now, but we can extend if needed
     pass
 
+class PerceptionFrameRequest(BaseModel):
+    image: str  # base64 data-URL JPEG
+    timestamp_ms: int = 0
+
 def build_router(static_dir: str) -> APIRouter:
     async def trace_dependency(request: Request, response: Response) -> str:
         # Establish a per-request trace id once, so every downstream log line
@@ -233,6 +237,20 @@ def build_router(static_dir: str) -> APIRouter:
     def reload_config(request: Request) -> dict:
         orchestrator = request.app.state.orchestrator
         return orchestrator.reload_config()
+
+    @router.post("/api/perception/video")
+    def perception_video(payload: PerceptionFrameRequest, request: Request) -> dict:
+        """Accept a browser-submitted webcam frame and feed it into the affect runtime.
+
+        The browser POSTs a downsampled JPEG (base64 data-URL) every ~320 ms.
+        The orchestrator decodes it through MediaPipe Face Landmarker (or the
+        null fallback when mediapipe is unavailable) and feeds the resulting
+        :class:`FaceSignals` into the runtime via its existing ``perception.frame``
+        event contract. The runtime's EMA smoothing prevents any single noisy
+        frame from dominating downstream policy decisions.
+        """
+        orchestrator = request.app.state.orchestrator
+        return orchestrator.process_perception_frame(payload.image, payload.timestamp_ms)
 
     @router.get("/health")
     @router.get("/api/health")
