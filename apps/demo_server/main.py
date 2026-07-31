@@ -47,7 +47,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--character", default="./character_input")
     p.add_argument("--renderer", default="livetalking", choices=["livetalking", "deeplivecam"])
-    p.add_argument("--voice-backend", default="luxtts", choices=["luxtts", "elevenlabs", "moss", "none"])
+    p.add_argument("--voice-backend", default="luxtts", choices=["luxtts", "elevenlabs", "fishaudio", "moss", "none"])
     p.add_argument("--agent-mode", default=None, choices=["fake", "external", "offline", "none", "openclaw", "hermes", "deerflow"])
     p.add_argument("--agent-url", default=None)
     p.add_argument("--agent-harness", default="generic")
