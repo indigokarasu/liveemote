@@ -17,8 +17,10 @@ from hermes_avatar.renderer.facefusion_adapter import FaceSwapAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
 from hermes_avatar.voice.base import VoiceBackend, VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
+from hermes_avatar.voice.fishaudio_adapter import FishAudioAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
+from hermes_avatar.renderer.wav2lip_adapter import Wav2LipAdapter
 from prometheus_client import Counter, Histogram
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,9 @@ class DemoOrchestrator:
         self._notify_renderer_theme()
         self.voice_backend_name = voice_backend
         self.voice = self._voice_backend(voice_backend)
+        self.wav2lip = Wav2LipAdapter(
+            enabled=getattr(self.config, "wav2lip_enabled", False),
+        )
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
 
@@ -154,6 +159,8 @@ class DemoOrchestrator:
             return NoopVoiceAdapter()
         if normalized == "elevenlabs":
             return ElevenLabsAdapter(cache_dir=self.config.voice.cache_dir)
+        if normalized == "fishaudio":
+            return FishAudioAdapter(cache_dir=self.config.voice.cache_dir)
         return LuxTTSAdapter(device=self.config.voice.device, cache_dir=self.config.voice.cache_dir)
 
     def _new_runtime(self) -> AffectRuntime:
@@ -288,7 +295,14 @@ class DemoOrchestrator:
             VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}}),
             self.index.voice_reference,
         )
-        self.renderer.speak(speech.audio_path, response.text, behavior)
+        # ---- Wav2Lip lip-sync (post-TTS, pre-renderer) ----
+        lip_sync_result = self.wav2lip.synthesize_lip_sync(
+            speech.audio_path,
+            str(self.index.canonical_image) if self.index.canonical_image else speech.audio_path,
+        )
+        # The renderer receives the lip-synced video path when available.
+        _render_audio = lip_sync_result.get("video_path", speech.audio_path)
+        self.renderer.speak(_render_audio, response.text, behavior)
         self.runtime.conversation.turn_state = "idle"
         self.runtime.avatar = self._neutral_avatar_state()
         return {**self.status(), "speech": speech.__dict__}

@@ -9,6 +9,13 @@ from hermes_avatar.util import (
     compute_backoff_delay,
     is_retryable_error,
 )
+from hermes_avatar.util.audit import (
+    audit_event,
+    snapshot as audit_snapshot,
+    KIND_TRIP,
+    KIND_RECOVER,
+    KIND_VENDOR_FALLBACK,
+)
 from .base import VoiceBackend, VoiceStyle, SynthesizedSpeech
 from .voice_cache import VoiceCache
 
@@ -47,6 +54,7 @@ class ElevenLabsAdapter(VoiceBackend):
             "backend": "elevenlabs",
             "configured": bool(self.api_key and self.voice_id),
             "circuit_breaker": self.cb.snapshot(),
+            "audit": audit_snapshot("voice.elevenlabs"),
         }
 
     def synthesize(
@@ -98,5 +106,11 @@ class ElevenLabsAdapter(VoiceBackend):
                     time.sleep(delay)
             if last_exc is not None:
                 self.cb.record_failure()
+                audit_event(
+                    "voice.elevenlabs",
+                    KIND_VENDOR_FALLBACK,
+                    level=logging.WARNING,
+                    error=str(last_exc),
+                )
                 raise last_exc
         return SynthesizedSpeech(text=text, audio_path=str(path), backend="elevenlabs")
