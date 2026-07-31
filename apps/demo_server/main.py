@@ -74,9 +74,12 @@ if __name__ == "__main__":
             else {}
         )
         if not caps.get("online", True):
-            logger.warning(
-                "renderer backend offline at startup; serving in passthrough mode",
-                extra={"audit": {"event": "startup.renderer_degraded", "backend": caps.get("backend")}},
+            from hermes_avatar.util.audit import audit_event, KIND_STARTUP_DEGRADED
+            audit_event(
+                "startup.renderer",
+                KIND_STARTUP_DEGRADED,
+                level=logging.WARNING,
+                backend=caps.get("backend"),
             )
 
     config = uvicorn.Config(

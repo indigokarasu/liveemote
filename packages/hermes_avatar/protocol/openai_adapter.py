@@ -47,6 +47,15 @@ from hermes_avatar.util import (
     compute_backoff_delay,
     is_retryable_error,
 )
+from hermes_avatar.util.audit import (
+    audit_event,
+    snapshot as audit_snapshot,
+    KIND_TRIP,
+    KIND_RECOVER,
+    KIND_HALF_OPEN,
+    KIND_RETRY_EXHAUSTED,
+    KIND_RETRY_SCHEDULED,
+)
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +214,9 @@ class OpenAICompatibleAdapter:
                 "total_retries": self.total_retries,
                 "retry_via": "compute_backoff_delay + is_retryable_error",
             },
+            # Aggregated audit counter cache; breaker trips auto-emitted via
+            # CircuitBreaker.record_failure.
+            "audit": audit_snapshot("protocol.openai"),
         }
 
     async def generate_response(
@@ -286,9 +298,28 @@ class OpenAICompatibleAdapter:
                     self.config.retry_max_delay,
                     self.config.retry_jitter_factor,
                 )
+                # Per-attempt audit: counts each retry separately so operators
+                # see retry storms without inflating the breaker (the breaker
+                # sees ONE outcome per user-request regardless of attempt count).
+                audit_event(
+                    "protocol.openai",
+                    KIND_RETRY_SCHEDULED,
+                    level=logging.INFO,
+                    attempt=attempt + 1,
+                    backoff_delay_s=round(delay, 3),
+                )
                 await asyncio.sleep(delay)
 
         if last_exc is not None:
+            # ONE audit event per user-request (NOT per attempt) -- matches
+            # the per-user-request breaker contract from c985d3f.
+            audit_event(
+                "protocol.openai",
+                KIND_RETRY_EXHAUSTED,
+                level=logging.WARNING,
+                attempts=self.last_retry_count + 1,
+                last_error=str(last_exc),
+            )
             self.cb.record_failure()
             if isinstance(last_exc, httpx.HTTPStatusError):
                 self.last_error = (

@@ -107,16 +107,16 @@ def build_router(static_dir: str) -> APIRouter:
         # APIRouter does not support).
         trace_id = ensure_trace_id()
         response.headers["X-Trace-Id"] = trace_id
-        logger.info(
-            "request received",
-            extra={
-                "trace_id": trace_id,
-                "audit": {
-                    "event": "http.request",
-                    "method": request.method,
-                    "path": request.url.path,
-                },
-            },
+        # Per-request audit emission via the central helper; same canonical
+        # extra={"audit": ...} shape ensures existing log filters stay
+        # compatible while the per-name counter cache bumps for /api/health.
+        from hermes_avatar.util.audit import audit_event, KIND_HTTP_REQUEST
+        audit_event(
+            "http",
+            KIND_HTTP_REQUEST,
+            level=logging.INFO,
+            method=request.method,
+            path=request.url.path,
         )
         return trace_id
 
@@ -334,6 +334,37 @@ def build_router(static_dir: str) -> APIRouter:
         except Exception as exc:
             components["protocol_agent"] = {"status": "degraded", "detail": {"error": str(exc)}}
         mark(components["protocol_agent"]["status"])
+
+        # --- audit_log (cross-cutting observability surface) ---
+        # Aggregates the per-name counter cache that ``audit_event`` maintains.
+        # Three indexed views:
+        #   by_breaker  -- one record per breaker (luxtts / renderer / openai)
+        #   by_subsystem -- one record per emitting subsystem namespace
+        #   events      -- flat dict-of-dicts; equivalent to the above two
+        try:
+            from hermes_avatar.util.audit import audit_snapshot
+            _audit = audit_snapshot()
+            components["audit_log"] = {
+                "status": "ok",
+                "detail": {
+                    "by_breaker": {
+                        "luxtts": _audit.get("breaker.luxtts", {}),
+                        "renderer": _audit.get("breaker.renderer", {}),
+                        "openai": _audit.get("breaker.openai", {}),
+                    },
+                    "by_subsystem": {
+                        "voice.luxtts": _audit.get("voice.luxtts", {}),
+                        "protocol.openai": _audit.get("protocol.openai", {}),
+                        "renderer.livetalking": _audit.get("renderer.livetalking", {}),
+                        "startup": _audit.get("startup", {}),
+                        "http": _audit.get("http", {}),
+                    },
+                    "events": _audit,
+                },
+            }
+        except Exception as exc:
+            components["audit_log"] = {"status": "degraded", "detail": {"error": str(exc)}}
+        mark(components["audit_log"]["status"])
 
         # --- character catalog ---
         try:

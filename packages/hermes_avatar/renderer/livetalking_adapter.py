@@ -14,6 +14,12 @@ from hermes_avatar.util import (
     compute_backoff_delay,
     is_retryable_error,
 )
+from hermes_avatar.util.audit import (
+    snapshot as audit_snapshot,
+    KIND_TRIP,
+    KIND_RECOVER,
+    KIND_HALF_OPEN,
+)
 from .base import Renderer
 from hermes_avatar.affect.state import AvatarBehaviorState
 from hermes_avatar.character.asset_index import BackgroundSpec, CharacterIndex, VisualStyle
@@ -93,6 +99,9 @@ class LiveTalkingAdapter(Renderer):
             "endpoint_status": self.endpoint_status,
             "last_latency_ms": self.last_latency_ms,
             "circuit_breaker": self.cb.snapshot(),
+            # Aggregated audit counter cache (breaker trips auto-emit via
+            # CircuitBreaker.record_failure + retry events from this adapter).
+            "audit": audit_snapshot("renderer.livetalking"),
         }
 
     def load_character(self, character_index: CharacterIndex) -> None:

@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from hermes_avatar.affect.state import UserAffectState
+from hermes_avatar.util.audit import snapshot as audit_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -160,6 +161,12 @@ class AgentBridge:
             "url_configured": bool(self.url),
             "available": self.available,
             "last_error": self.last_error,
+            # Audit counter mirror with the underlying openai adapter.
+            # Same record shape exposed by the adapter under `adapter.audit`;
+            # /api/health can read either this top-level audit OR the nested
+            # detail.adapter_status.audit -- both stay in lockstep.
+            "audit": audit_snapshot("protocol.openai")
+            if self.mode in OPENAI_COMPATIBLE_MODES else {},
         }
         if self.mode in OPENAI_COMPATIBLE_MODES:
             status["base_url"] = self.base_url
