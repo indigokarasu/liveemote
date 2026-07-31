@@ -17,6 +17,7 @@ from hermes_avatar.renderer.facefusion_adapter import FaceSwapAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
 from hermes_avatar.voice.base import VoiceBackend, VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
+from hermes_avatar.voice.emotion_tag_processor import EmotionTagProcessor
 from hermes_avatar.voice.fishaudio_adapter import FishAudioAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
@@ -150,6 +151,7 @@ class DemoOrchestrator:
         self.wav2lip = Wav2LipAdapter(
             enabled=getattr(self.config, "wav2lip_enabled", False),
         )
+        self.emotion_processor = EmotionTagProcessor()
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
 
@@ -290,9 +292,19 @@ class DemoOrchestrator:
         style = self.active_style()
         style_voice = asdict(style.voice) if style is not None else {}
         merged_voice = {**style_voice, **response_voice}
-        speech = self.voice.synthesize(
+        base_style = VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}})
+
+        # ---- Emotion tag preprocessor (LLM tags → TTS prosody) --------
+        emotion_result = self.emotion_processor.process(
+            response.tags,
             response.text,
-            VoiceStyle(**{k: v for k, v in merged_voice.items() if k in {"pace", "warmth", "intensity"}}),
+            backend=self.voice_backend_name,
+            base_style=base_style,
+        )
+
+        speech = self.voice.synthesize(
+            emotion_result.text,
+            emotion_result.voice_style,
             self.index.voice_reference,
         )
         # ---- Wav2Lip lip-sync (post-TTS, pre-renderer) ----
