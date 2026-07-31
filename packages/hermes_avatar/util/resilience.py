@@ -23,6 +23,8 @@ import threading
 import time
 from typing import Any
 
+from .audit import audit_event, KIND_TRIP, KIND_RECOVER, KIND_HALF_OPEN
+
 logger = logging.getLogger(__name__)
 
 CLOSED = "closed"
@@ -91,9 +93,10 @@ class CircuitBreaker:
                 and (time.time() - self._last_failure_time) > self._open_timeout
             ):
                 self._state = HALF_OPEN
-                logger.info(
-                    "circuit breaker probing (half-open)",
-                    extra={"audit": {"event": "cb.half_open", "name": self._name}},
+                audit_event(
+                    f"breaker.{self._name}",
+                    KIND_HALF_OPEN,
+                    level=logging.INFO,
                 )
                 return True
             return False
@@ -105,9 +108,10 @@ class CircuitBreaker:
                 self._state = CLOSED
                 self._failure_count = 0
                 self._last_failure_time = None
-                logger.info(
-                    "circuit breaker recovered (closed)",
-                    extra={"audit": {"event": "cb.recovered", "name": self._name}},
+                audit_event(
+                    f"breaker.{self._name}",
+                    KIND_RECOVER,
+                    level=logging.INFO,
                 )
             else:
                 # CLOSED: clear any accumulated count.
@@ -121,15 +125,11 @@ class CircuitBreaker:
             self._last_failure_time = time.time()
             if self._failure_count >= self._failure_threshold:
                 self._state = OPEN
-                logger.warning(
-                    "circuit breaker tripped (open)",
-                    extra={
-                        "audit": {
-                            "event": "cb.open",
-                            "name": self._name,
-                            "failure_count": self._failure_count,
-                        }
-                    },
+                audit_event(
+                    f"breaker.{self._name}",
+                    KIND_TRIP,
+                    level=logging.WARNING,
+                    failure_count=self._failure_count,
                 )
 
 

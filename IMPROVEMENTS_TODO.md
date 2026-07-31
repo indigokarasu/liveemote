@@ -37,9 +37,10 @@ Based on code review, here are prioritized improvements for the Hermes Live Avat
 **Implementation:** Create a retry decorator that can be applied to external API calls.
 
 ### 2.3 Improved Timeout Handling
-**File:** `packages/hermes_avatar/renderer/livetalking_adapter.py`
-**Description:** Make timeout values configurable and add better timeout handling for HTTP requests.
-**Implementation:** Extract timeout values to config and add more granular timeout handling.
+**File:** `packages/hermes_avatar/voice/luxtts_adapter.py` and renderer adapters
+**Status:** Completed (rolling 60s subprocess-second budget on LuxTTSAdapter;
+  see `test_luxtts_cost_cap.py`).  Configurable via env var
+  `LUXTTS_COST_CAP_SECONDS_PER_MINUTE` (default 240s/min).
 
 ### 2.4 Comprehensive Health Check Endpoints
 **File:** `apps/demo_server/routes.py`
@@ -119,8 +120,9 @@ Based on code review, here are prioritized improvements for the Hermes Live Avat
 
 ### 5.5 Structured Logging
 **File:** Throughout codebase
-**Description:** Replace print statements with structured logging using the logging module.
-**Implementation:** Add loggers to modules and use appropriate log levels (DEBUG, INFO, WARNING, ERROR).
+**Status:** Completed (`hermes_avatar.util.audit` central helper + canonical
+  `KIND_*` taxonomy + thread-safe per-name counter cache).  All three
+  breakers and all three adapters now emit through the helper.
 
 ### 5.6 Comprehensive Inline Documentation
 **File:** Throughout codebase
@@ -150,9 +152,17 @@ Based on code review, here are prioritized improvements for the Hermes Live Avat
 **Implementation:** Add debug endpoints that expose internal affect state for visualization.
 
 ### 6.5 Audit Logging for Configuration Changes
-**File:** Configuration loading code
-**Description:** Log all configuration changes for audit and debugging purposes.
-**Implementation:** Add logging whenever configuration is loaded or reloaded.
+**File:** Configuration loading code + adapter lifecycle
+**Status:** Completed (audit_event now fires on startup.renderer_degraded,
+  http.request, breaker.trip/recover/half_open, retry.scheduled,
+  retry.exhausted, vendor_fallback, cost_cap_exceeded).
+
+## Operator Runbook
+
+**Status:** Completed (this commit) -- see `apps/demo_server/RUNBOOK.md`.
+Symptom -> component -> cause -> fix tables mapping every `/api/health`
+component state to the operator action.  Driven off the live `/api/health`
+shape from commit `c985d3f` + the audit counter cache added in this commit.
 
 ## Implementation Priority Order
 
