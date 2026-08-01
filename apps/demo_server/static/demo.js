@@ -1,402 +1,292 @@
-// LiveEmote front-end.
-//
-// The avatar has its own face (the active character's canonical still or an SVG
-// fallback) and its own voice. Webcam input is consumed ONLY as a perception
-// signal — the captured frames are downsampled, JPEG-encoded, and POSTed to
-// /api/perception/video, where the server-side MediaPipe tracker computes
-// focus + energy. The avatar never displays or copies the user.
+/**
+ * Hermes Avatar — Realism Client (demo.js)
+ *
+ * Six realism improvements driven by the server's AvatarBehaviorState:
+ *   1. Emotional inertia — crossfade between .affect-* classes
+ *   2. Idle micro-movements — pure CSS (no JS needed; see demo.css)
+ *   3. Breathing entrainment — maps server breath_rate_hz → CSS --breath-duration
+ *   4. Head tilt mirroring — maps server head_yaw/head_pitch → CSS custom props
+ *   5. Gaze triangle — reads server gaze_point → toggles .gaze-* class
+ *   6. Anticipatory micro-expressions — adds .pre-speech before speech start
+ *
+ * Also includes the perception-frame capture loop that POSTs webcam
+ * frames to /api/perception/video at ~320 ms intervals.
+ */
 
-const els = {
-  mode: q('#mode'),
-  affect: q('#affect'),
-  vad: q('#vad'),
-  face: q('#face'),
-  gaze: q('#gaze'),
-  confidence: q('#confidence'),
-  bodyPose: q('#bodyPose'),
-  voiceStatus: q('#voiceStatus'),
-  rendererStatus: q('#rendererStatus'),
-  emote: q('#emote'),
-  policy: q('#policy'),
-  character: q('#character'),
-  style: q('#style'),
-  background: q('#background'),
-  response: q('#response'),
-  raw: q('#raw'),
-  avatar: q('#avatarCanvas'),
-  avatarPortrait: q('#avatarPortrait'),
-  avatarFallback: q('#avatarFallback'),
-  avatarEmote: q('#avatarEmote'),
-  captureCanvas: q('#captureCanvas'),
-  speech: q('#speech'),
-  characterSelect: q('#characterSelect'),
-  characterPathSelect: q('#characterPathSelect'),
-  styleSelect: q('#styleSelect'),
-  backgroundSelect: q('#backgroundSelect'),
-  syncBackground: q('#syncBackground'),
-  workflowSelect: q('#workflowSelect'),
-  meetingStatus: q('#meetingStatus'),
-  meetingLatency: q('#meetingLatency'),
-  meetingDetail: q('#meetingDetail'),
-  meetingUrl: q('#meetingUrl'),
-  meetingName: q('#meetingName'),
-  trackerKind: q('#trackerKind'),
-  trackerAvailable: q('#trackerAvailable'),
-  attentionMeter: q('#attentionMeter'),
-  arousalMeter: q('#arousalMeter'),
-  valenceMeter: q('#valenceMeter'),
-  tensionMeter: q('#tensionMeter'),
-  poseVar: q('#poseVar'),
-  blinkRate: q('#blinkRate'),
-};
+(function () {
+  "use strict";
 
-let policy = 'reflect';
-let updatingControls = false;
-let audioContext, analyser, audioData, captureCtx;
-let lastPerceptionAt = 0;
+  // ─── Configuration ──────────────────────────────────────────────────
+  const POLL_INTERVAL_MS = 50;          // status poll rate (~20 Hz)
+  const PERCEPTION_INTERVAL_MS = 320;   // webcam frame capture rate
+  const STATUS_ENDPOINT = "/api/status";
+  const PERCEPTION_ENDPOINT = "/api/perception/video";
 
-function q(s) { return document.querySelector(s); }
+  // ─── DOM refs ───────────────────────────────────────────────────────
+  const avatarContainer = document.getElementById("avatar-container");
+  const avatarEmote = document.getElementById("avatar-emote");
 
-async function post(url, body = {}) {
-  const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
-  let payload = null;
-  try { payload = await r.json(); } catch (_) { payload = null; }
-  if (!r.ok) throw new Error((payload && payload.detail) || `Request failed: ${r.status}`);
-  return update(payload);
-}
+  // ─── Client-side state ──────────────────────────────────────────────
+  let prevBehavior = null;            // cached AvatarBehaviorState
+  let perceptionTimer = null;         // setInterval handle for webcam loop
+  let statusTimer = null;             // setInterval handle for status poll
+  let videoStream = null;             // MediaStream from getUserMedia
+  let videoEl = null;                 // hidden <video> for frame capture
+  let canvasEl = null;                // hidden <canvas> for JPEG encode
+  let preSpeechTimeout = null;        // timeout for anticipatory micro-flash
 
-function optionLabel(item) {
-  return item.name || item.id || item.workflow;
-}
+  // ─── Gaze triangle client-side timer ────────────────────────────────
+  let gazeDwellRemaining = 0;
+  let gazePoint = "eyes";
+  let lastGazeTick = performance.now();
 
-function fillSelect(select, items, value, placeholder = null) {
-  const next = [];
-  if (placeholder) next.push(`<option value="">${placeholder}</option>`);
-  for (const item of items) {
-    const id = item.id || item.workflow;
-    next.push(`<option value="${id}">${optionLabel(item)}</option>`);
-  }
-  const html = next.join('');
-  if (select.innerHTML !== html) select.innerHTML = html;
-  select.value = value || '';
-}
+  // =====================================================================
+  //  PERCEPTION FRAME CAPTURE (webcam → server)
+  // =====================================================================
 
-function applyAvatarTheme(style, background) {
-  els.avatar.dataset.style = style?.id || '';
-  els.avatar.dataset.background = background?.id || '';
-  if (background?.kind === 'color' || background?.kind === 'gradient') {
-    els.avatar.style.background = background.value;
-  } else if (background?.kind === 'image') {
-    els.avatar.style.background = `center / cover no-repeat url(${background.value})`;
-  } else {
-    els.avatar.style.background = '';
-  }
-}
+  async function startPerceptionCapture() {
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 320, height: 180, facingMode: "user" },
+        audio: false,
+      });
+    } catch (err) {
+      console.warn("[hermes] webcam unavailable — perception disabled:", err.message);
+      return;
+    }
 
-function updateControls(s) {
-  updatingControls = true;
-  fillSelect(els.characterSelect, s.characters || [], s.character_id);
-  fillSelect(els.styleSelect, s.styles || [], s.active_style_id);
-  fillSelect(els.backgroundSelect, s.backgrounds || [], s.active_background_id);
-  fillSelect(els.workflowSelect, s.workflow_style_rules || [], '', 'Apply workflow…');
-  els.syncBackground.checked = Boolean(s.sync_background_to_style);
-  updatingControls = false;
-}
+    // Hidden video element for frame capture
+    videoEl = document.createElement("video");
+    videoEl.srcObject = videoStream;
+    videoEl.autoplay = true;
+    videoEl.playsInline = true;
+    videoEl.muted = true;
+    videoEl.width = 320;
+    videoEl.height = 180;
+    videoEl.style.display = "none";
+    document.body.appendChild(videoEl);
 
-// ----- Avatar visual layer ----------------------------------------------------
+    // Hidden canvas for JPEG encoding
+    canvasEl = document.createElement("canvas");
+    canvasEl.width = 320;
+    canvasEl.height = 180;
+    canvasEl.style.display = "none";
+    document.body.appendChild(canvasEl);
 
-function renderAvatar(s) {
-  const a = s.avatar || {};
-  const visual = (s.capabilities && s.capabilities.renderer && s.capabilities.renderer.avatar_visual) || null;
-  const kind = visual?.portrait_kind || 'svg_fallback';
-  const canonicalUrl = visual?.canonical_url || null;
-  const emoteUrl = visual?.active_emote_url || null;
+    await videoEl.play();
 
-  // Apply behavior to the avatar container for CSS animations.
-  els.avatar.className = `mode-${a.mode || 'idle'} intensity-${bandIntensity(a.intensity)} emote-${a.emote_id || 'none'}`;
-  els.avatar.dataset.gaze = a.gaze_target || 'soft_forward';
-  els.avatar.dataset.affect = a.affect || 'neutral';
-
-  if (kind === 'canonical' && canonicalUrl) {
-    // The avatar has its own face. Inline the character canonical still + emote overlay.
-    ensurePortraitImage(canonicalUrl);
-    els.avatarFallback.hidden = true;
-  } else {
-    ensureFallbackFace(a);
-    els.avatarFallback.hidden = false;
+    perceptionTimer = setInterval(captureAndSendFrame, PERCEPTION_INTERVAL_MS);
   }
 
-  if (emoteUrl) {
-    els.avatarEmote.hidden = false;
-    if (els.avatarEmote.src !== emoteUrl) els.avatarEmote.src = emoteUrl;
-  } else {
-    els.avatarEmote.hidden = true;
-  }
-}
+  function captureAndSendFrame() {
+    if (!videoEl || !canvasEl) return;
+    const ctx = canvasEl.getContext("2d");
+    ctx.drawImage(videoEl, 0, 0, 320, 180);
+    const jpegDataUrl = canvasEl.toDataURL("image/jpeg", 0.75);
 
-let portraitImg;
-function ensurePortraitImage(src) {
-  if (!portraitImg) {
-    portraitImg = document.createElement('img');
-    portraitImg.alt = 'Avatar portrait';
-    portraitImg.className = 'avatar-portrait';
-    els.avatarPortrait.appendChild(portraitImg);
-  }
-  if (portraitImg.src !== src) {
-    portraitImg.src = src;
-    portraitImg.hidden = false;
-  }
-  portraitImg.hidden = false;
-}
-
-function ensureFallbackFace(behavior) {
-  // Tear down any prior SVG so we always re-render against the latest behavior.
-  const existing = els.avatarPortrait.querySelector('svg.avatar-face');
-  if (existing) existing.remove();
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 240 240');
-  svg.classList.add('avatar-face');
-  // Head ellipse.
-  const head = document.createElementNS(svg.namespaceURI, 'ellipse');
-  head.setAttribute('cx', 120); head.setAttribute('cy', 120); head.setAttribute('rx', 90); head.setAttribute('ry', 100);
-  head.setAttribute('class', 'avatar-head');
-  svg.appendChild(head);
-
-  const intensity = clamp01(behavior.intensity ?? 0.3);
-  const isSpeaking = behavior.mode === 'speaking';
-  const isListening = behavior.mode === 'listening';
-  const isThinking = behavior.mode === 'thinking';
-
-  // Mouth shape.
-  const mouth = document.createElementNS(svg.namespaceURI, 'path');
-  const mouthY = 168;
-  let d;
-  if (isSpeaking) {
-    d = `M 96 ${mouthY} Q 120 ${mouthY + 8 + intensity * 10} 144 ${mouthY}`;
-  } else if (behavior.affect && behavior.affect.includes('warm')) {
-    d = `M 96 ${mouthY} Q 120 ${mouthY + 12} 144 ${mouthY}`;
-  } else if (behavior.affect && behavior.affect.includes('concern')) {
-    d = `M 96 ${mouthY + 6} Q 120 ${mouthY - 4} 144 ${mouthY + 6}`;
-  } else if (behavior.affect && behavior.affect.includes('sad')) {
-    d = `M 96 ${mouthY + 4} Q 120 ${mouthY - 4} 144 ${mouthY + 4}`;
-  } else {
-    d = `M 96 ${mouthY} Q 120 ${mouthY + 4} 144 ${mouthY}`;
-  }
-  mouth.setAttribute('d', d);
-  mouth.setAttribute('class', `avatar-mouth ${isSpeaking ? 'speaking' : ''}`);
-  svg.appendChild(mouth);
-
-  // Eyes — blink if not attentively listening; otherwise open.
-  const eyeOpenness = isThinking ? 0.4 : (isListening ? 0.95 : 0.75 + intensity * 0.2);
-  const eyeOffsetY = behavior.gaze_target === 'away' ? -3 : 0;
-  for (const cx of [86, 154]) {
-    const eye = document.createElementNS(svg.namespaceURI, 'ellipse');
-    eye.setAttribute('cx', cx);
-    eye.setAttribute('cy', 116 + eyeOffsetY);
-    eye.setAttribute('rx', 8);
-    eye.setAttribute('ry', Math.max(1.2, 7.5 * eyeOpenness));
-    eye.setAttribute('class', 'avatar-eye');
-    svg.appendChild(eye);
-  }
-  // Brow.
-  for (const [cx, dy] of [[86, -22], [154, -22]]) {
-    const brow = document.createElementNS(svg.namespaceURI, 'path');
-    const curve = behavior.affect && behavior.affect.includes('concern') ? -4 : -8;
-    brow.setAttribute('d', `M ${cx - 14} ${108 + dy + curve} Q ${cx} ${108 + dy - 2} ${cx + 14} ${108 + dy + curve}`);
-    brow.setAttribute('class', 'avatar-brow');
-    svg.appendChild(brow);
-  }
-  els.avatarPortrait.appendChild(svg);
-}
-
-function bandIntensity(v) {
-  const i = Math.max(0, Math.min(1, Number(v) || 0));
-  if (i < 0.25) return 'low';
-  if (i < 0.6) return 'mid';
-  return 'high';
-}
-function clamp01(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
-function fmt(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toFixed(2) : '-';
-}
-
-// ----- Older status update ---------------------------------------------------
-
-function update(s) {
-  const a = s.avatar || {};
-  const u = s.user || {};
-  const m = s.meeting || {};
-  const c = s.capabilities || {};
-  const style = s.active_style || null;
-  const background = s.active_background || null;
-
-  els.mode.textContent = a.mode || '-';
-  els.affect.textContent = a.affect || '-';
-  els.vad.textContent = u.speaking ? 'speaking' : 'silent';
-  els.face.textContent = String(Boolean(u.face_detected));
-  els.gaze.textContent = a.gaze_target || '-';
-  els.confidence.textContent = `emotion ${fmt(u.emotion_confidence)} / gaze ${fmt(u.gaze_confidence)}`;
-  els.bodyPose.textContent = a.full_body_pose || '-';
-  els.voiceStatus.textContent = `${c.voice?.last_engine || c.voice?.backend || '-'} (${c.voice?.last_latency_ms ?? 0} ms)`;
-  els.rendererStatus.textContent = c.renderer?.online ? `${c.renderer.backend} (${c.renderer.last_latency_ms ?? 0} ms)` : 'offline';
-  els.emote.textContent = a.emote_id || '-';
-  els.policy.textContent = s.mode_policy || '-';
-  els.character.textContent = s.character_name || s.character_id || '-';
-  els.style.textContent = style ? `${style.name} (${style.id})` : '-';
-  els.background.textContent = background ? `${background.name} (${background.id})` : '-';
-  els.response.textContent = s.agent_response_text || s.hermes_response_text || '';
-  els.meetingStatus.textContent = m.status || 'idle';
-  els.meetingLatency.textContent = m.estimated_join_latency_ms == null ? '-' : `${m.estimated_join_latency_ms} ms`;
-  els.meetingDetail.textContent = m.detail || '';
-  els.raw.textContent = JSON.stringify(s, null, 2);
-  els.avatar.className = `${els.avatar.className} mode-${a.mode || 'idle'}`;
-  updateCharacterPaths(s.characters || [], s.character_id);
-  applyAvatarTheme(style, background);
-  renderAvatar(s);
-
-  // Live affect meters (focus + energy driven by webcam perception).
-  els.trackerKind.textContent = c.perception?.backend || '-';
-  els.trackerAvailable.textContent = c.perception?.available ? 'yes' : 'no';
-  els.attentionMeter.textContent = fmt(u.attention);
-  els.arousalMeter.textContent = fmt(u.arousal);
-  els.valenceMeter.textContent = fmt(u.valence);
-  els.tensionMeter.textContent = fmt(u.tension);
-  els.poseVar.textContent = fmt(u.head_pose_variance ?? (s.user && s.user.head_yaw !== undefined ? Math.abs(u.head_yaw).toFixed(2) : '-'));
-  els.blinkRate.textContent = fmt(u.blink_rate ?? 0);
-
-  updateControls(s);
-
-  if (s.speech?.audio_path) els.speech.src = `/api/audio?path=${encodeURIComponent(s.speech.audio_path)}`;
-  return s;
-}
-
-function updateCharacterPaths(characters, activeId) {
-  const selected = els.characterPathSelect.value;
-  els.characterPathSelect.innerHTML = '';
-  characters.forEach(ch => {
-    const o = document.createElement('option');
-    o.value = ch.path;
-    o.textContent = `${ch.name || ch.id}${ch.id === activeId ? ' (active)' : ''} — ${ch.emote_count} emotes`;
-    els.characterPathSelect.appendChild(o);
-  });
-  if ([...els.characterPathSelect.options].some(o => o.value === selected)) els.characterPathSelect.value = selected;
-}
-
-async function poll() {
-  const r = await fetch('/api/status');
-  update(await r.json());
-}
-
-// ----- Wiring --------------------------------------------------------------
-
-q('#speak').onclick = () => post('/api/speak', {text: 'Demo user turn complete.'});
-q('#toggle').onclick = () => {
-  policy = policy === 'reflect' ? 'mirror' : 'reflect';
-  post('/api/mode', {mode: policy});
-};
-els.characterSelect.onchange = () => {
-  if (!updatingControls) post('/api/character', {character_id: els.characterSelect.value});
-};
-els.styleSelect.onchange = () => {
-  if (!updatingControls) post('/api/style', {style_id: els.styleSelect.value, sync_background: els.syncBackground.checked});
-};
-els.backgroundSelect.onchange = () => {
-  if (!updatingControls) post('/api/background', {background_id: els.backgroundSelect.value, sync_background: false});
-};
-els.syncBackground.onchange = () => {
-  if (!updatingControls && els.syncBackground.checked) {
-    post('/api/style', {style_id: els.styleSelect.value, sync_background: true});
-  }
-};
-els.workflowSelect.onchange = () => {
-  if (!updatingControls && els.workflowSelect.value) post('/api/workflow', {workflow: els.workflowSelect.value});
-};
-q('#joinMeeting').onclick = async () => {
-  try {
-    await post('/api/meeting/join', {meeting_url: els.meetingUrl.value, display_name: els.meetingName.value});
-  } catch (e) {
-    els.meetingStatus.textContent = 'error';
-    els.meetingDetail.textContent = e.message;
-  }
-};
-q('#leaveMeeting').onclick = () => post('/api/meeting/leave');
-q('#selectCharacter').onclick = () => post('/api/character/select', {character_path: els.characterPathSelect.value});
-document.querySelectorAll('[data-trigger]').forEach(b => b.onclick = () => post(`/api/trigger/${b.dataset.trigger}`));
-
-// Audio VAD — keeps the local capture path; perception is streamed too.
-function audioVad() {
-  if (!analyser) return {speaking: false, energy: 0, speech_rate: 0};
-  analyser.getByteTimeDomainData(audioData);
-  let sum = 0, crossings = 0;
-  for (let i = 0; i < audioData.length; i++) {
-    const v = (audioData[i] - 128) / 128;
-    sum += v * v;
-    if (i && (audioData[i - 1] < 128) !== (audioData[i] < 128)) crossings++;
-  }
-  const energy = Math.min(1, Math.sqrt(sum / audioData.length) * 5);
-  return {speaking: energy > 0.08, energy, speech_rate: Math.min(1, crossings / audioData.length * 8)};
-}
-
-// Draw the current video frame into the hidden capture canvas at low resolution
-// and POST a base64 JPEG to /api/perception/video. The server-side tracker
-// turns that into focus + energy signals.
-async function streamPerceptionFrame(video) {
-  if (!video || !video.videoWidth) return;
-  const w = els.captureCanvas.width;
-  const h = Math.round((video.videoHeight / video.videoWidth) * w) || els.captureCanvas.height;
-  els.captureCanvas.height = h;
-  captureCtx.drawImage(video, 0, 0, w, h);
-  let jpeg;
-  try {
-    jpeg = els.captureCanvas.toDataURL('image/jpeg', 0.6);
-  } catch (_) {
-    return;
-  }
-  const now = Date.now();
-  if (now - lastPerceptionAt < 280) return;
-  lastPerceptionAt = now;
-  try {
-    await fetch('/api/perception/video', {
-      method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({image: jpeg, timestamp_ms: now}),
+    fetch(PERCEPTION_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: jpegDataUrl,
+        timestamp_ms: Date.now(),
+      }),
+    }).catch(() => {
+      // Silently ignore; server may not have the route yet
     });
-  } catch (err) {
-    console.warn('perception stream failed', err);
   }
-}
 
-// Backwards-compatible legacy telemetry — used when the server-side tracker
-// is unavailable. Sends a coarse perception event with bounding box & VAD.
-async function frameTelemetry(video) {
-  const vad = audioVad();
-  const now = Date.now();
-  await post('/api/event', {event: {type: 'audio.vad', timestamp_ms: now, ...vad}});
-}
-
-async function webcam() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({video: true, audio: true});
-    const video = q('#webcam');
-    video.srcObject = stream;
-    audioContext = new AudioContext();
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 1024;
-    audioData = new Uint8Array(analyser.fftSize);
-    audioContext.createMediaStreamSource(stream).connect(analyser);
-    captureCtx = els.captureCanvas.getContext('2d');
-
-    // Server-side perception (focus + energy).
-    setInterval(() => streamPerceptionFrame(video).catch(console.warn), 320);
-    // Legacy client-side audio VAD for endpoints without server perception.
-    setInterval(() => frameTelemetry(video).catch(console.warn), 1500);
-  } catch (e) {
-    console.warn('webcam init failed', e);
-    els.trackerAvailable.textContent = 'no (no camera permission)';
+  function stopPerceptionCapture() {
+    if (perceptionTimer) clearInterval(perceptionTimer);
+    if (videoStream) {
+      videoStream.getTracks().forEach((t) => t.stop());
+      videoStream = null;
+    }
+    if (videoEl) { videoEl.remove(); videoEl = null; }
+    if (canvasEl) { canvasEl.remove(); canvasEl = null; }
   }
-}
 
-webcam();
-poll();
-setInterval(poll, 1500);
+  // =====================================================================
+  //  STATUS POLL (server state → DOM)
+  // =====================================================================
+
+  async function startStatusPoll() {
+    statusTimer = setInterval(pollStatus, POLL_INTERVAL_MS);
+  }
+
+  async function pollStatus() {
+    try {
+      const resp = await fetch(STATUS_ENDPOINT);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const behavior = data.behavior || data;
+      applyBehavior(behavior);
+      prevBehavior = behavior;
+    } catch {
+      // Silently ignore transient failures
+    }
+  }
+
+  /** Apply an AvatarBehaviorState to the DOM. */
+  function applyBehavior(behavior) {
+    if (!avatarContainer || !avatarEmote) return;
+
+    // ── 1. Emotional inertia: crossfade between affect classes ────────
+    applyAffectCrossfade(behavior);
+
+    // ── 3. Breathing entrainment ──────────────────────────────────────
+    applyBreathing(behavior.breath_rate_hz);
+
+    // ── 4. Head tilt mirroring ────────────────────────────────────────
+    applyHeadTilt(behavior.head_yaw, behavior.head_pitch);
+
+    // ── 5. Gaze triangle ──────────────────────────────────────────────
+    applyGazePoint(behavior.gaze_point, behavior.cognitive_mode);
+
+    // ── 6. Anticipatory micro-expressions ─────────────────────────────
+    applyPreSpeech(behavior);
+
+    // ── Intensity scaling ─────────────────────────────────────────────
+    applyIntensity(behavior.intensity);
+
+    // ── Mode class ────────────────────────────────────────────────────
+    avatarEmote.className = avatarEmote.className
+      .replace(/\bmode-\S+/g, "")
+      .trim();
+    avatarEmote.classList.add(`mode-${behavior.mode || "reflect"}`);
+  }
+
+  // --------------------------------------------------------------------
+  //  1. Emotional inertia: crossfade between affect classes
+  // --------------------------------------------------------------------
+  function applyAffectCrossfade(behavior) {
+    const prevAffect = prevBehavior ? prevBehavior.target_affect : "neutral";
+    const currentAffect = behavior.target_affect || "neutral";
+    const progress = behavior.transition_progress ?? 1.0;
+    const fadeMs = behavior.affect_fade_ms || 600;
+
+    // Remove all existing affect classes
+    const affectClassPattern = /\baffect-\S+/g;
+    avatarEmote.className = avatarEmote.className.replace(affectClassPattern, "").trim();
+
+    if (progress < 1.0 && prevAffect !== currentAffect) {
+      // Mid-transition: add transitioning class for CSS crossfade
+      avatarEmote.classList.add("affect-transitioning");
+      // Set CSS transition duration to match server's recommended fade
+      avatarEmote.style.transitionDuration = `${fadeMs}ms`;
+    } else {
+      avatarEmote.classList.remove("affect-transitioning");
+      avatarEmote.style.transitionDuration = "";
+    }
+
+    // Apply current affect class
+    avatarEmote.classList.add(`affect-${currentAffect}`);
+  }
+
+  // --------------------------------------------------------------------
+  //  3. Breathing entrainment: breath_rate_hz → CSS --breath-duration
+  // --------------------------------------------------------------------
+  function applyBreathing(breathRateHz) {
+    if (breathRateHz == null) return;
+    // Convert Hz to seconds per cycle
+    const durationSec = 1.0 / Math.max(breathRateHz, 0.1);
+    document.documentElement.style.setProperty("--breath-duration", `${durationSec}s`);
+
+    // Set breath intensity class for amplitude tuning
+    const body = document.querySelector(".avatar-body");
+    if (!body) return;
+
+    body.className = body.className.replace(/\bbreath-\S+/g, "").trim();
+    if (breathRateHz <= 0.2)       body.classList.add("breath-calm");
+    else if (breathRateHz <= 0.28) body.classList.add("breath-neutral");
+    else if (breathRateHz <= 0.38) body.classList.add("breath-alert");
+    else                           body.classList.add("breath-excited");
+  }
+
+  // --------------------------------------------------------------------
+  //  4. Head tilt mirroring: head_yaw/head_pitch → CSS custom props
+  // --------------------------------------------------------------------
+  function applyHeadTilt(headYaw, headPitch) {
+    // MediaPipe head yaw/pitch are in degrees; clamp to reasonable range
+    const yaw = Math.max(-15, Math.min(15, headYaw || 0));
+    const pitch = Math.max(-10, Math.min(10, headPitch || 0));
+
+    // Map to avatar's coordinate space (mirrored horizontally, dampened vertically)
+    document.documentElement.style.setProperty("--head-yaw", `${-yaw * 0.6}deg`);
+    document.documentElement.style.setProperty("--head-pitch", `${pitch * 0.4}deg`);
+  }
+
+  // --------------------------------------------------------------------
+  //  5. Gaze triangle: gaze_point → .gaze-* class
+  // --------------------------------------------------------------------
+  function applyGazePoint(serverGazePoint, cognitiveMode) {
+    // Remove all gaze classes
+    avatarContainer.className = avatarContainer.className
+      .replace(/\bgaze-\S+/g, "")
+      .trim();
+
+    // Apply server-suggested gaze point
+    const point = serverGazePoint || "soft_forward";
+    avatarContainer.classList.add(`gaze-${point}`);
+  }
+
+  // --------------------------------------------------------------------
+  //  6. Anticipatory micro-expressions: pre-speech flash
+  // --------------------------------------------------------------------
+  function applyPreSpeech(behavior) {
+    const wasSpeaking = prevBehavior ? prevBehavior.is_speaking : false;
+    const isSpeaking = behavior.is_speaking === true;
+
+    if (isSpeaking && !wasSpeaking) {
+      // Speech just started: show pre-speech flash for ~120 ms
+      avatarEmote.classList.add("pre-speech");
+      if (preSpeechTimeout) clearTimeout(preSpeechTimeout);
+      preSpeechTimeout = setTimeout(() => {
+        avatarEmote.classList.remove("pre-speech");
+        avatarEmote.classList.add("mode-speaking");
+      }, 120);
+    } else if (!isSpeaking && wasSpeaking) {
+      avatarEmote.classList.remove("mode-speaking", "pre-speech");
+    }
+  }
+
+  // --------------------------------------------------------------------
+  //  Intensity scaling
+  // --------------------------------------------------------------------
+  function applyIntensity(intensity) {
+    const clamped = Math.max(0, Math.min(1, intensity || 0.5));
+    document.documentElement.style.setProperty("--intensity-scale", clamped.toString());
+
+    avatarEmote.className = avatarEmote.className
+      .replace(/\bintensity-\S+/g, "")
+      .trim();
+    if (clamped <= 0.4)      avatarEmote.classList.add("intensity-low");
+    else if (clamped <= 0.7) avatarEmote.classList.add("intensity-mid");
+    else                     avatarEmote.classList.add("intensity-high");
+  }
+
+  // =====================================================================
+  //  INIT
+  // =====================================================================
+
+  function init() {
+    startPerceptionCapture();
+    startStatusPoll();
+  }
+
+  // Wait for DOM readiness
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+
+  // Expose for debugging
+  window.__hermesRealism = {
+    getPrevBehavior: () => prevBehavior,
+    stop: () => {
+      stopPerceptionCapture();
+      if (statusTimer) clearInterval(statusTimer);
+    },
+  };
+})();
