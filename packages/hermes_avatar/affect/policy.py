@@ -151,6 +151,25 @@ def _ema(old: float, new: float, alpha: float = _HEAD_EMA_ALPHA) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Conversation state (backward-compat with DemoOrchestrator.status())
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ConversationState:
+    """Minimal conversation tracking for orchestrator compatibility."""
+    turn_state: str = "idle"
+    user_turn_ms: float = 0.0
+    assistant_turn_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn_state": self.turn_state,
+            "user_turn_ms": self.user_turn_ms,
+            "assistant_turn_ms": self.assistant_turn_ms,
+        }
+
+
+# ---------------------------------------------------------------------------
 # AffectRuntime
 # ---------------------------------------------------------------------------
 
@@ -164,15 +183,25 @@ class AffectRuntime:
 
     def __init__(
         self,
-        state: Optional[UserAffectState] = None,
+        config_or_state=None,
         mode: str = "reflect",
+        **kwargs,
     ) -> None:
-        self.user = state or UserAffectState()
+        # Accept old calling convention: AffectRuntime(config, emote_lookup=...)
+        if isinstance(config_or_state, UserAffectState):
+            self.user = config_or_state
+        else:
+            self.user = UserAffectState()
+        self._config = config_or_state if config_or_state is not None and not isinstance(config_or_state, UserAffectState) else None
+        self._emote_lookup = kwargs.pop("emote_lookup", None)
+
         self.blender = AffectBlender(default_fade_ms=600)
         self.gaze = GazePolicy()
         self.latch = ExpressionLatch(min_dwell_ms=250)
 
         self.mode: str = mode
+        self.avatar: AvatarBehaviorState = AvatarBehaviorState()
+        self.conversation = ConversationState()
 
         # LLM-supplied emotion tags (set by orchestrator before speak_test)
         self.hermes_tags: dict[str, Any] = {}
@@ -183,8 +212,12 @@ class AffectRuntime:
 
     # -- event ingestion ---------------------------------------------------
 
-    def consume(self, event: dict[str, Any]) -> None:
-        """Ingest an event: perception.frame or llm.tags."""
+    def consume(self, event: dict[str, Any]) -> AvatarBehaviorState:
+        """Ingest an event: perception.frame or llm.tags.
+
+        Returns the current behavior state so callers (process_perception_frame)
+        can immediately relay it to the renderer.
+        """
         etype = event.get("type", "")
 
         if etype == "perception.frame":
@@ -197,40 +230,48 @@ class AffectRuntime:
                 gaze_direction=str(event.get("gaze_direction", "toward_user")),
                 head_yaw=float(event.get("head_yaw", 0.0)),
                 head_pitch=float(event.get("head_pitch", 0.0)),
-                ts_ms=int(event.get("last_updated_ms", 0)),
+                ts_ms=int(event.get("last_updated_ms", event.get("timestamp_ms", 0))),
             )
         elif etype == "llm.tags":
             self.hermes_tags = dict(event.get("tags", {}))
+
+        # Return current behavior so callers can relay to renderer
+        return self._build_state(self._last_tick_ms)
 
     # ------------------------------------------------------------------
     # Tick — the main loop entry point
     # ------------------------------------------------------------------
 
-    def tick(self, dt_ms: float = 0.0, accumulate_dt: bool = True) -> AvatarBehaviorState:
-        """Advance the simulation by *dt_ms* and return current behavior.
+    def tick(self, now_or_dt_ms: float = 0.0, accumulate_dt: bool = True) -> AvatarBehaviorState:
+        """Advance the simulation and return current behavior.
 
-        Called at ~60 Hz by the status poll handler.  If *accumulate_dt*
-        is False (e.g. during a passive status() call), the internal
-        timers are NOT advanced, preventing heartbeat drift when no
-        real events arrive.
+        Backward-compat: accepts either a delta-ms (< 10 min) or a
+        Unix-timestamp-ms (> 1e9, from orchestrator.status()).
+        When *accumulate_dt* is False the internal conversation timers
+        are NOT advanced, preventing heartbeat drift.
         """
-        if accumulate_dt:
-            self._dt_accumulator_ms += dt_ms
+        # Detect calling convention: unix timestamp vs delta
+        if now_or_dt_ms > 1_000_000_000:  # unix timestamp in ms
+            now_ms = now_or_dt_ms
+            if self._last_tick_ms > 0 and accumulate_dt:
+                self._dt_accumulator_ms += (now_ms - self._last_tick_ms)
+        else:
+            if accumulate_dt:
+                self._dt_accumulator_ms += now_or_dt_ms
+            now_ms = self._last_tick_ms + self._dt_accumulator_ms
 
-        now_ms = self._last_tick_ms + self._dt_accumulator_ms
         self._last_tick_ms = now_ms
 
-        # --- 1. Emotional inertia: run the blender ------------------------
+        return self._build_state(now_ms)
+
+    def _build_state(self, now_ms: float) -> AvatarBehaviorState:
+        """Build the current AvatarBehaviorState from all subsystems."""
         user_expr = self.user.dominant_expression
 
         is_stale = (
             self._frame_count > 0
             and (now_ms - self.user.last_updated_ms) > self.user.stale_after_ms
         )
-
-        target_affect: str
-        target_intensity: float
-        cognitive_mode: str
 
         if is_stale:
             target_affect = "neutral"
@@ -245,26 +286,17 @@ class AffectRuntime:
             dt_ms=self._dt_accumulator_ms,
         )
 
-        # --- 2. Gaze triangle: advance gaze policy ------------------------
         gaze: GazeResult = self.gaze.tick(
             cognitive_mode, dt_ms=self._dt_accumulator_ms,
         )
 
-        # --- 3. Expression latch: enforce minimum dwell -------------------
         emote = self.latch.try_switch(blend.emote_id, now_ms)
-
-        # --- 4. Breathing entrainment: arousal → breath rate --------------
         breath_hz = _breath_rate_from_arousal(self.user._ema_arousal)
-
-        # --- 5. Head tilt mirroring (EMA-smoothed) ------------------------
         head_yaw = self.user._ema_head_yaw
         head_pitch = self.user._ema_head_pitch
-
-        # --- 6. Anticipatory micro-expressions: pre-speech affect ---------
         pre_speech = self.hermes_tags.get("affect", "")
         is_speaking = bool(pre_speech) and self.mode != "recovering"
 
-        # --- Assemble the behaviour state ---------------------------------
         state = AvatarBehaviorState(
             target_affect=blend.target_affect,
             prev_affect=blend.prev_affect,
@@ -286,7 +318,16 @@ class AffectRuntime:
         )
 
         self._dt_accumulator_ms = 0.0
+        self.avatar = state
         return state
+
+    # ------------------------------------------------------------------
+    # Mode control (backward compat)
+    # ------------------------------------------------------------------
+
+    def set_mode(self, mode: str) -> None:
+        """Switch between mirror / reflect modes."""
+        self.mode = mode
 
     # ------------------------------------------------------------------
     # Internal

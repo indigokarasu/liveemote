@@ -53,6 +53,19 @@ class UserAffectState:
     last_updated_ms: int = 0
     stale_after_ms: int = 2000    # after this many ms, treat perception as stale
 
+    def to_dict(self) -> dict:
+        return {
+            "dominant_expression": self.dominant_expression,
+            "valence": self.valence,
+            "arousal": self.arousal,
+            "tension": self.tension,
+            "attention": self.attention,
+            "gaze_direction": self.gaze_direction,
+            "head_yaw": self.head_yaw,
+            "head_pitch": self.head_pitch,
+            "last_updated_ms": self.last_updated_ms,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Avatar behavior state (sent to the browser every status poll)
@@ -102,6 +115,27 @@ class AvatarBehaviorState:
     mode: str = "reflect"                # "reflect" | "mirror" | "recovering"
     mirror_strength: float = 0.0         # 0.0 = regulated, 1.0 = full mirror
 
+    def to_dict(self) -> dict:
+        return {
+            "target_affect": self.target_affect,
+            "prev_affect": self.prev_affect,
+            "intensity": self.intensity,
+            "prev_intensity": self.prev_intensity,
+            "transition_progress": self.transition_progress,
+            "affect_fade_ms": self.affect_fade_ms,
+            "emote_id": self.emote_id,
+            "gaze_point": self.gaze_point,
+            "cognitive_mode": self.cognitive_mode,
+            "gaze_target": self.gaze_target,
+            "head_yaw": self.head_yaw,
+            "head_pitch": self.head_pitch,
+            "breath_rate_hz": self.breath_rate_hz,
+            "is_speaking": self.is_speaking,
+            "pre_speech_affect": self.pre_speech_affect,
+            "mode": self.mode,
+            "mirror_strength": self.mirror_strength,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Perception event (feeds into runtime.consume)
@@ -125,7 +159,51 @@ class FaceSignals:
     head_pitch: float = 0.0
     last_updated_ms: int = 0
 
+    def to_dict(self) -> dict:
+        return {
+            "face_detected": self.face_detected,
+            "dominant_expression": self.dominant_expression,
+            "valence": self.valence,
+            "arousal": self.arousal,
+            "tension": self.tension,
+            "attention": self.attention,
+            "gaze_direction": self.gaze_direction,
+            "head_yaw": self.head_yaw,
+            "head_pitch": self.head_pitch,
+            "last_updated_ms": self.last_updated_ms,
+        }
+
     @classmethod
     def empty(cls) -> "FaceSignals":
         """Return a neutral / no-face result (NullFaceTracker fallback)."""
         return cls()
+
+
+# ---------------------------------------------------------------------------
+# Lightweight object pool for AvatarBehaviorState (perf: avoids alloc churn)
+# ---------------------------------------------------------------------------
+
+_POOL: list[AvatarBehaviorState] = []
+_MAX_POOL_SIZE: int = 8
+
+
+def acquire_behavior_state() -> AvatarBehaviorState:
+    """Return a recycled or new AvatarBehaviorState instance.
+
+    Callers MUST call :func:`release_behavior_state` when done so the
+    instance can be reused by the next tick.
+    """
+    if _POOL:
+        return _POOL.pop()
+    return AvatarBehaviorState()
+
+
+def release_behavior_state(state: AvatarBehaviorState) -> None:
+    """Return *state* to the pool for reuse."""
+    if len(_POOL) < _MAX_POOL_SIZE:
+        _POOL.append(state)
+
+
+def reset_behavior_state_pool() -> None:
+    """Clear the pool (useful between test runs)."""
+    _POOL.clear()
