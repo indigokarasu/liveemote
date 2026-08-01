@@ -1,221 +1,332 @@
-from __future__ import annotations
-import time
-from hermes_avatar.config.schema import AppConfig, load_config
-from .state import UserAffectState, ConversationState, AvatarBehaviorState
-from .smoothing import ema, clamp, ExpressionLatch, reaction_delay
-from .listening_policy import listening_behavior
-from .speaking_policy import speaking_behavior
-from .mirror_policy import mirrored_affect
-from .reflect_policy import reflected_affect
-from .interruption_policy import interruption_risk
+"""
+AffectRuntime — the central emotional-regulation engine.
+
+Data flow per tick::
+
+    consume(perception.frame)  →  UserAffectState (EMA-smoothed)
+    consume(llm.tags)          →  hermes_tags cache
+    tick(dt_ms)                →  AffectBlender + GazePolicy + affect mapping
+                               →  AvatarBehaviorState  (→ browser)
+
+All six realism improvements are wired in:
+  1. Emotional inertia (AffectBlender) — crossfade metadata
+  2. Idle micro-movements — client-side CSS (no server footprint)
+  3. Breathing entrainment — breath_rate_hz computed from arousal
+  4. Head tilt mirroring — head_yaw/head_pitch EMA-smoothed
+  5. Gaze triangle — GazePolicy advances gaze_point each tick
+  6. Anticipatory micro-expressions — pre_speech_affect when speaking begins
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from .state import AvatarBehaviorState, FaceSignals, UserAffectState
+from .affect_blender import AffectBlender, BlendResult
+from .gaze_policy import GazePolicy, GazeResult
+
+
+# ---------------------------------------------------------------------------
+# Expression latch: minimum dwell before changing expressions
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExpressionLatch:
+    """Prevents rapid emote-switching by enforcing minimum dwell times."""
+
+    current_emote: str = "neutral"
+    min_dwell_ms: int = 250
+    _locked_until_ms: float = 0.0
+
+    def try_switch(self, desired: str, now_ms: float) -> str:
+        """Return the actual emote to display.
+
+        If the latch is still locked, returns the current emote.
+        Otherwise switches to *desired* and re-locks.
+        """
+        if now_ms < self._locked_until_ms:
+            return self.current_emote
+        if desired != self.current_emote:
+            self.current_emote = desired
+        self._locked_until_ms = now_ms + self.min_dwell_ms
+        return self.current_emote
+
+
+# ---------------------------------------------------------------------------
+# Affect mapping: user emotion → avatar response category
+# ---------------------------------------------------------------------------
+
+# The psychology-driven response taxonomy:
+#   mirror   — share the affect (joy, calm, interest)
+#   counter  — regulate downward (anger, frustration, anxiety)
+#   validate — hold space (sadness, grief, disappointment)
+#   reflect  — acknowledge without absorbing (low attention, gaze away)
+
+_COUNTER_EMOTIONS = frozenset({
+    "angry", "frustrated", "annoyed", "irritated", "enraged",
+})
+
+_VALIDATE_EMOTIONS = frozenset({
+    "sad", "disappointed", "grief", "hurt", "lonely",
+})
+
+_MIRROR_EMOTIONS = frozenset({
+    "happy", "joy", "excited", "surprised_positive", "amused",
+    "calm", "content", "interested", "curious",
+})
+
+
+def _classify_affect(expression: str) -> str:
+    """Return the response category for a user expression."""
+    if expression in _COUNTER_EMOTIONS:
+        return "counter"
+    if expression in _VALIDATE_EMOTIONS:
+        return "validate"
+    if expression in _MIRROR_EMOTIONS:
+        return "mirror"
+    return "reflect"
+
+
+def _avatar_affect_for(
+    user_expression: str,
+    mode: str = "reflect",
+):
+    """Map a user expression to an avatar affect label + base intensity.
+
+    The *mode* ("mirror" / "reflect") tunes intensity & warmth but never
+    changes the response *category* — that comes from the user's state.
+    """
+    category = _classify_affect(user_expression)
+    is_mirror = mode == "mirror"
+
+    if category == "mirror":
+        if user_expression in ("excited", "joy"):
+            return ("warm_acknowledging", 0.85 if is_mirror else 0.7)
+        if user_expression == "happy":
+            return ("small_delayed_smile", 0.75 if is_mirror else 0.65)
+        if user_expression == "surprised_positive":
+            return ("warm_acknowledging", 0.75)
+        if user_expression == "amused":
+            return ("small_delayed_smile", 0.7 if is_mirror else 0.6)
+        # calm, content, interested, curious
+        return ("calm_attentive", 0.6 if is_mirror else 0.5)
+
+    if category == "counter":
+        if is_mirror:
+            return ("grounded_concern_soft_brow", 0.35)
+        return ("validating_grounded", 0.45)
+
+    if category == "validate":
+        if is_mirror:
+            return ("soft_concern", 0.5)
+        return ("warm_steady_consoling", 0.55)
+
+    return ("patient_low_energy", 0.35 if is_mirror else 0.4)
+
+
+# ---------------------------------------------------------------------------
+# Breathing entrainment: arousal → breath rate
+# ---------------------------------------------------------------------------
+
+def _breath_rate_from_arousal(arousal: float) -> float:
+    """Map arousal [-1, +1] to breath rate in Hz.
+
+    Calm (low arousal):  ~0.20 Hz = 12 breaths/min  (slow, soothing)
+    Neutral:             ~0.25 Hz = 15 breaths/min  (natural)
+    Excited (high arousal): ~0.40 Hz = 24 breaths/min (rapid)
+    """
+    clamped = max(-1.0, min(1.0, arousal))
+    return 0.25 + clamped * 0.12
+
+
+# ---------------------------------------------------------------------------
+# Head tilt mirroring: EMA config
+# ---------------------------------------------------------------------------
+
+_HEAD_EMA_ALPHA = 0.15   # low = heavy smoothing (appropriate for head pose)
+
+
+def _ema(old: float, new: float, alpha: float = _HEAD_EMA_ALPHA) -> float:
+    """Exponential moving average."""
+    return old + alpha * (new - old)
+
+
+# ---------------------------------------------------------------------------
+# AffectRuntime
+# ---------------------------------------------------------------------------
 
 class AffectRuntime:
-    def __init__(self, config: AppConfig | None = None, emote_lookup=None) -> None:
-        self.config = config or load_config()
-        self.user = UserAffectState()
-        self.conversation = ConversationState()
-        self.avatar = AvatarBehaviorState()
-        self.mode = self.config.behavior.default_mode
-        self.hermes_tags: dict | None = None
-        self.expression_latch = ExpressionLatch(dwell_ms=self.config.affect.min_emote_dwell_ms)
-        self.emote_lookup = emote_lookup or (lambda state: None)
-        self._last_tick_ms = self._now()
-        self._last_speaking_ms = 0
+    """Central emotional-regulation engine.
 
-    def _now(self) -> int:
-        return int(time.time() * 1000)
+    Instantiated once per avatar session.  Receives perception frames
+    and LLM tags via ``consume()``, produces ``AvatarBehaviorState``
+    via ``tick()`` every ~50 ms.
+    """
 
-    def consume(self, event) -> AvatarBehaviorState:
-        etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", "")
-        data = event if isinstance(event, dict) else event.model_dump()
-        if etype == "perception.frame":
-            self._update_face(data)
-        elif etype == "audio.vad":
-            self._update_audio(data)
-        elif etype == "hermes.response":
-            self.hermes_tags = data.get("tags", {})
-            self.conversation.turn_state = "assistant_thinking"
-        return self.tick(data.get("timestamp_ms") or self._now())
-
-    def _dominant_expression(self, expr: dict) -> tuple[str, float]:
-        smile, frown = expr.get("smile", 0.0), expr.get("frown", 0.0)
-        brow, eye = expr.get("brow_raise", 0.0), expr.get("eye_open", 0.5)
-        if frown > 0.55 and brow > 0.25:
-            return "frustrated", frown
-        if frown > 0.45:
-            return "sad", frown
-        if smile > 0.45:
-            return "happy", smile
-        if eye < 0.25:
-            return "tired", 1 - eye
-        return "neutral", 0.3
-
-    def _update_face(self, data: dict) -> None:
-        a = self.config.affect.smoothing.face_alpha
-        self.user.face_detected = bool(data.get("face_detected"))
-        self.user.head_yaw = clamp(ema(self.user.head_yaw, float(data.get("head_yaw", 0)), a), -self.config.gaze.max_yaw_deg, self.config.gaze.max_yaw_deg)
-        self.user.head_pitch = clamp(ema(self.user.head_pitch, float(data.get("head_pitch", 0)), a), -self.config.gaze.max_pitch_deg, self.config.gaze.max_pitch_deg)
-
-        # Prefer the tracker's direct gaze/attention signals when available
-        # (MediaPipeFaceTracker produces these). Fall back to the old browser-
-        # side face_center heuristic when they are absent.
-        tracker_gaze = data.get("gaze_direction")
-        tracker_attention = data.get("attention")
-        if tracker_gaze and isinstance(tracker_attention, (int, float)):
-            self.user.gaze_direction = str(tracker_gaze)
-            self.user.gaze_confidence = ema(self.user.gaze_confidence, float(data.get("gaze_confidence", 0.85 if self.user.face_detected else 0.0)), a)
-            self.user.attention = ema(self.user.attention, float(tracker_attention), a)
-        else:
-            center = data.get("face_center") or (0.5, 0.5)
-            centered = abs(center[0] - 0.5) < 0.22 and abs(center[1] - 0.5) < 0.22
-            self.user.gaze_direction = "toward_user" if self.user.face_detected and centered else "away"
-            self.user.gaze_confidence = ema(self.user.gaze_confidence, float(data.get("gaze_confidence", 0.85 if self.user.face_detected else 0.0)), a)
-            target_attention = 0.9 if self.user.face_detected and centered else 0.35 if self.user.face_detected else 0.0
-            self.user.attention = ema(self.user.attention, target_attention, a)
-
-        # Tracker produces direct dominant_expression, valence, arousal, tension.
-        # Prefer them; fall back to heuristic derivation from expression map.
-        tracker_expr = data.get("dominant_expression")
-        tracker_valence = data.get("valence")
-        tracker_arousal = data.get("arousal")
-        tracker_tension = data.get("tension")
-        if tracker_expr and isinstance(tracker_valence, (int, float)) and isinstance(tracker_arousal, (int, float)):
-            dominant = str(tracker_expr)
-            conf = max(float(data.get("emotion_confidence", 0.0)), 0.5)
-            expression_arousal = float(tracker_arousal)
-        else:
-            dominant, conf = self._dominant_expression(data.get("expression", {}))
-            conf = max(conf, float(data.get("emotion_confidence", 0.0)))
-            expression_arousal = (
-                0.65 if dominant in {"happy", "frustrated"}
-                else 0.25 if dominant == "sad"
-                else 0.1 if dominant == "tired"
-                else 0.2
-            )
-        self.user.emotion_confidence = ema(self.user.emotion_confidence, conf, a)
-        self.user.dominant_expression = self.expression_latch.update(dominant, conf, int(data.get("timestamp_ms", self._now())))
-        self.user.valence = ema(
-            self.user.valence,
-            float(tracker_valence) if isinstance(tracker_valence, (int, float))
-            else (0.5 if dominant == "happy" else -0.4 if dominant in {"sad", "frustrated"} else 0.0),
-            self.config.affect.smoothing.affect_alpha,
-        )
-        self.user.tension = ema(
-            self.user.tension,
-            float(tracker_tension) if isinstance(tracker_tension, (int, float))
-            else (0.7 if dominant == "frustrated" else 0.25),
-            self.config.affect.smoothing.affect_alpha,
-        )
-        self.user.arousal = ema(self.user.arousal, expression_arousal, self.config.affect.smoothing.affect_alpha)
-        self.user.last_updated_ms = int(data.get("timestamp_ms", self._now()))
-
-    def _update_audio(self, data: dict) -> None:
-        a = self.config.affect.smoothing.audio_alpha
-        speaking = bool(data.get("speaking"))
-        self.user.speaking = speaking
-        self.user.speech_energy = ema(self.user.speech_energy, float(data.get("energy", 0)), a)
-        self.user.speech_rate = ema(self.user.speech_rate, float(data.get("speech_rate", 0)), a)
-        vocal_arousal = clamp(
-            (self.user.speech_energy * 0.65) + (self.user.speech_rate * 0.35),
-            0.0,
-            1.0,
-        )
-        self.user.arousal = ema(self.user.arousal, vocal_arousal, self.config.affect.smoothing.affect_alpha)
-        now = int(data.get("timestamp_ms", self._now()))
-        if speaking:
-            self._last_speaking_ms = now
-            self.conversation.turn_state = "user_speaking"
-            self.conversation.silence_ms = 0
-        else:
-            self.conversation.silence_ms = now - self._last_speaking_ms if self._last_speaking_ms else 0
-            if self.conversation.turn_state == "user_speaking" and self.conversation.silence_ms > 500:
-                self.conversation.turn_state = "assistant_thinking"
-        self.user.last_updated_ms = now
-
-    def tick(
+    def __init__(
         self,
-        timestamp_ms: int | None = None,
-        *,
-        accumulate_dt: bool = True,
-    ) -> AvatarBehaviorState:
-        """Recompute ``self.avatar`` for the current moment and return it.
+        state: Optional[UserAffectState] = None,
+        mode: str = "reflect",
+    ) -> None:
+        self.user = state or UserAffectState()
+        self.blender = AffectBlender(default_fade_ms=600)
+        self.gaze = GazePolicy()
+        self.latch = ExpressionLatch(min_dwell_ms=250)
 
-        ``accumulate_dt`` (default ``True``) gates whether this tick is allowed
-        to advance the conversation-turn timers (``user_turn_ms`` /
-        ``assistant_turn_ms``) and reset ``_last_tick_ms``. The default
-        ``True`` keeps the historical contract for event-driven callers
-        (``consume``, ``speak_test``, ``set_policy_mode``, ``trigger``). Pass
-        ``accumulate_dt=False`` for bookkeeping-only ticks that must NOT
-        reflect artifact drift into the conversation-state payload - this is
-        what :meth:`DemoOrchestrator.status` does on every 1.5 s browser
-        poll, so the conversation timers stay event-driven instead of
-        compounding on every heartbeat. The staleness override below still
-        fires under ``accumulate_dt=False`` because it reads
-        ``self.user.last_updated_ms`` (event-driven timestamp), not
-        ``_last_tick_ms``.
+        self.mode: str = mode
+
+        # LLM-supplied emotion tags (set by orchestrator before speak_test)
+        self.hermes_tags: dict[str, Any] = {}
+
+        self._frame_count: int = 0
+        self._last_tick_ms: float = 0.0
+        self._dt_accumulator_ms: float = 0.0
+
+    # -- event ingestion ---------------------------------------------------
+
+    def consume(self, event: dict[str, Any]) -> None:
+        """Ingest an event: perception.frame or llm.tags."""
+        etype = event.get("type", "")
+
+        if etype == "perception.frame":
+            self._update_face(
+                expression=str(event.get("dominant_expression", "neutral")),
+                valence=float(event.get("valence", 0.0)),
+                arousal=float(event.get("arousal", 0.0)),
+                tension=float(event.get("tension", 0.0)),
+                attention=float(event.get("attention", 0.5)),
+                gaze_direction=str(event.get("gaze_direction", "toward_user")),
+                head_yaw=float(event.get("head_yaw", 0.0)),
+                head_pitch=float(event.get("head_pitch", 0.0)),
+                ts_ms=int(event.get("last_updated_ms", 0)),
+            )
+        elif etype == "llm.tags":
+            self.hermes_tags = dict(event.get("tags", {}))
+
+    # ------------------------------------------------------------------
+    # Tick — the main loop entry point
+    # ------------------------------------------------------------------
+
+    def tick(self, dt_ms: float = 0.0, accumulate_dt: bool = True) -> AvatarBehaviorState:
+        """Advance the simulation by *dt_ms* and return current behavior.
+
+        Called at ~60 Hz by the status poll handler.  If *accumulate_dt*
+        is False (e.g. during a passive status() call), the internal
+        timers are NOT advanced, preventing heartbeat drift when no
+        real events arrive.
         """
-        now = timestamp_ms or self._now()
         if accumulate_dt:
-            dt = max(0, now - self._last_tick_ms)
-            self._last_tick_ms = now
-            if self.conversation.turn_state == "user_speaking":
-                self.conversation.user_turn_ms += dt
-            elif self.conversation.turn_state == "assistant_speaking":
-                self.conversation.assistant_turn_ms += dt
-        self.conversation.tension = self.user.tension
-        self.conversation.interruption_risk = interruption_risk(self.user, self.conversation)
-        if self.conversation.turn_state == "assistant_speaking":
-            self.avatar = speaking_behavior(self.user, self.hermes_tags, self.emote_lookup("speaking_optional"))
-            self.avatar.full_body_pose = "presenting"
-        elif self.user.speaking:
-            self.avatar = listening_behavior(self.user, self.conversation, self.emote_lookup("listening"))
-            self.avatar.full_body_pose = "attentive_lean"
-        elif self.conversation.turn_state == "assistant_thinking":
-            affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="thinking", affect=affect, gaze_target=self.user.gaze_direction, emote_id=self.emote_lookup("thinking"), intensity=intensity, delay_ms=reaction_delay(self.mode, self.config.affect.reaction_delay_ms), full_body_pose="thinking_shift")
-        else:
-            affect, intensity = (mirrored_affect(self.user) if self.mode == "mirror" else reflected_affect(self.user))
-            self.avatar = AvatarBehaviorState(mode="idle", affect=affect, gaze_target=self.user.gaze_direction if self.user.face_detected else "soft_forward", emote_id=self.emote_lookup("neutral"), intensity=intensity, mirror_strength=self.config.behavior.mirroring_strength if self.mode == "mirror" else 0.0, delay_ms=reaction_delay(self.mode, self.config.affect.reaction_delay_ms))
-        # Ambient-recovery override --------------------------------------
-        # When the perception stream has gone silent for longer than the
-        # configured ambient threshold, snap the avatar into ``mode="recovering"``
-        # so the browser's CSS ambient loop fires (see
-        # ``apps/demo_server/static/demo.css`` ``.mode-recovering``). Without this,
-        # the avatar would simply freeze on whatever ``mode``/``intensity`` it
-        # happened to be emitting when the user's webcam disconnected - the
-        # exact "pausing or freezing on its last drawn state" feel the user
-        # wants to avoid.
-        #
-        # Three deliberate invariants:
-        #   * ``self.user.last_updated_ms > 0`` keeps us out of the ambient
-        #     path on first boot (no perception event yet = not a loss, just
-        #     silence pending). Without this guard a cold-started server
-        #     would flip to ambient before its first ever frame landed.
-        #   * ``self.config.affect.ambient_after_ms > 0`` is the configured
-        #     opt-out (``AFFECT__AMBIENT_AFTER_MS=0`` keeps the legacy
-        #     freeze-on-last behaviour).
-        #   * ``mirror_strength = 0.0`` and ``emote_id = self.emote_lookup("neutral")``
-        #     preserve the project's headline signal-leakage invariant: the
-        #     ambient branch never carries webcam-derived state into the
-        #     avatar.
-        if (
-            self.config.affect.ambient_after_ms > 0
-            and self.user.last_updated_ms > 0
-            and (now - self.user.last_updated_ms) > self.config.affect.ambient_after_ms
-        ):
-            self.avatar.mode = "recovering"
-            # Damp the existing intensity down so the CSS keyframes drive the
-            # visible motion regardless of the last user-driven amplitude.
-            self.avatar.intensity = min(self.avatar.intensity, 0.10)
-            self.avatar.gaze_target = "soft_forward"
-            self.avatar.mirror_strength = 0.0
-            neutral = self.emote_lookup("neutral")
-            if neutral is not None:
-                self.avatar.emote_id = neutral
-            self.avatar.full_body_pose = "standing_idle"
-        return self.avatar
+            self._dt_accumulator_ms += dt_ms
 
-    def set_mode(self, mode: str) -> None:
-        if mode not in {"mirror", "reflect"}:
-            raise ValueError("mode must be mirror or reflect")
-        self.mode = mode
+        now_ms = self._last_tick_ms + self._dt_accumulator_ms
+        self._last_tick_ms = now_ms
+
+        # --- 1. Emotional inertia: run the blender ------------------------
+        user_expr = self.user.dominant_expression
+
+        is_stale = (
+            self._frame_count > 0
+            and (now_ms - self.user.last_updated_ms) > self.user.stale_after_ms
+        )
+
+        target_affect: str
+        target_intensity: float
+        cognitive_mode: str
+
+        if is_stale:
+            target_affect = "neutral"
+            target_intensity = 0.10
+            cognitive_mode = "thinking"
+        else:
+            target_affect, target_intensity = _avatar_affect_for(user_expr, self.mode)
+            cognitive_mode = self._infer_cognitive_mode()
+
+        blend: BlendResult = self.blender.tick(
+            target_affect, target_intensity,
+            dt_ms=self._dt_accumulator_ms,
+        )
+
+        # --- 2. Gaze triangle: advance gaze policy ------------------------
+        gaze: GazeResult = self.gaze.tick(
+            cognitive_mode, dt_ms=self._dt_accumulator_ms,
+        )
+
+        # --- 3. Expression latch: enforce minimum dwell -------------------
+        emote = self.latch.try_switch(blend.emote_id, now_ms)
+
+        # --- 4. Breathing entrainment: arousal → breath rate --------------
+        breath_hz = _breath_rate_from_arousal(self.user._ema_arousal)
+
+        # --- 5. Head tilt mirroring (EMA-smoothed) ------------------------
+        head_yaw = self.user._ema_head_yaw
+        head_pitch = self.user._ema_head_pitch
+
+        # --- 6. Anticipatory micro-expressions: pre-speech affect ---------
+        pre_speech = self.hermes_tags.get("affect", "")
+        is_speaking = bool(pre_speech) and self.mode != "recovering"
+
+        # --- Assemble the behaviour state ---------------------------------
+        state = AvatarBehaviorState(
+            target_affect=blend.target_affect,
+            prev_affect=blend.prev_affect,
+            intensity=blend.intensity,
+            prev_intensity=blend.prev_intensity,
+            transition_progress=blend.transition_progress,
+            affect_fade_ms=blend.affect_fade_ms,
+            emote_id=emote,
+            gaze_point=gaze.gaze_point,
+            cognitive_mode=cognitive_mode,
+            gaze_target="soft_forward" if is_stale else self.user.gaze_direction,
+            head_yaw=head_yaw,
+            head_pitch=head_pitch,
+            breath_rate_hz=breath_hz,
+            is_speaking=is_speaking,
+            pre_speech_affect=pre_speech,
+            mode=self.mode if not is_stale else "recovering",
+            mirror_strength=1.0 if self.mode == "mirror" else 0.0,
+        )
+
+        self._dt_accumulator_ms = 0.0
+        return state
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _update_face(
+        self,
+        expression: str,
+        valence: float,
+        arousal: float,
+        tension: float,
+        attention: float,
+        gaze_direction: str,
+        head_yaw: float,
+        head_pitch: float,
+        ts_ms: int,
+    ) -> None:
+        """Apply EMA smoothing to a new perception frame."""
+        self._frame_count += 1
+        self.user.dominant_expression = expression
+        self.user.valence = valence
+        self.user.arousal = arousal
+        self.user.tension = tension
+        self.user.attention = attention
+        self.user.gaze_direction = gaze_direction
+        self.user.head_yaw = head_yaw
+        self.user.head_pitch = head_pitch
+        self.user.last_updated_ms = ts_ms
+
+        self.user._ema_valence = _ema(self.user._ema_valence, valence)
+        self.user._ema_arousal = _ema(self.user._ema_arousal, arousal)
+        self.user._ema_tension = _ema(self.user._ema_tension, tension)
+        self.user._ema_attention = _ema(self.user._ema_attention, attention)
+        self.user._ema_head_yaw = _ema(self.user._ema_head_yaw, head_yaw)
+        self.user._ema_head_pitch = _ema(self.user._ema_head_pitch, head_pitch)
+
+    def _infer_cognitive_mode(self) -> str:
+        """Infer cognitive mode from user state + LLM tags."""
+        if self.hermes_tags:
+            return "thinking"
+        if self.user._ema_attention < 0.3 and self.user.gaze_direction == "away":
+            return "thinking"
+        return "listening"
