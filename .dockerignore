@@ -1,8 +1,36 @@
-.git
-.pytest_cache
-**/__pycache__
+# Python
+__pycache__/
 *.pyc
-cache
-vendor
-.venv
-.env
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+
+# Git
+.git/
+.gitignore
+
+# Tests
+tests/
+
+# Docs
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vendor
+vendor/
+
+# Character assets (large, not needed for Docker build)
+character_input/
