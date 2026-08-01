@@ -10,7 +10,9 @@
  *   6. Anticipatory micro-expressions — adds .pre-speech before speech start
  *
  * Also includes the perception-frame capture loop that POSTs webcam
- * frames to /api/perception/video at ~320 ms intervals.
+ * frames to /api/perception/video at ~320 ms intervals, and populates
+ * the on-screen indicator cards (affect bar, breath circle, gaze dot,
+ * head-tilt readouts, telemetry pills).
  */
 
 (function () {
@@ -25,6 +27,29 @@
   // ─── DOM refs ───────────────────────────────────────────────────────
   const avatarContainer = document.getElementById("avatar-container");
   const avatarEmote = document.getElementById("avatar-emote");
+  const webcamPreview = document.getElementById("webcam-preview");
+  const webcamNote = document.getElementById("webcam-note");
+
+  // Indicator card DOM refs
+  const affectLabel = document.getElementById("affect-label");
+  const affectBarFill = document.getElementById("affect-bar-fill");
+  const affectTransitionLabel = document.getElementById("affect-transition-label");
+  const breathRateDisplay = document.getElementById("breath-rate-display");
+  const gazeDot = document.getElementById("gaze-dot");
+  const gazeLabel = document.getElementById("gaze-label");
+  const tiltYawVal = document.getElementById("tilt-yaw-val");
+  const tiltYawFill = document.getElementById("tilt-yaw-fill");
+  const tiltPitchVal = document.getElementById("tilt-pitch-val");
+  const tiltPitchFill = document.getElementById("tilt-pitch-fill");
+
+  // Telemetry pill refs
+  const telemMode = document.getElementById("telem-mode");
+  const telemCognitive = document.getElementById("telem-cognitive");
+  const telemSpeaking = document.getElementById("telem-speaking");
+  const telemIntensity = document.getElementById("telem-intensity");
+  const telemFace = document.getElementById("telem-face");
+  const telemEmote = document.getElementById("telem-emote");
+  const telemMirror = document.getElementById("telem-mirror");
 
   // ─── Client-side state ──────────────────────────────────────────────
   let prevBehavior = null;            // cached AvatarBehaviorState
@@ -52,6 +77,10 @@
       });
     } catch (err) {
       console.warn("[hermes] webcam unavailable — perception disabled:", err.message);
+      if (webcamNote) {
+        webcamNote.textContent = "Webcam unavailable. Perception pipeline inactive.";
+        webcamNote.style.color = "#ef4444";
+      }
       return;
     }
 
@@ -72,6 +101,16 @@
     canvasEl.height = 180;
     canvasEl.style.display = "none";
     document.body.appendChild(canvasEl);
+
+    // Wire the visible webcam preview (shares the same MediaStream)
+    if (webcamPreview) {
+      webcamPreview.srcObject = videoStream;
+      webcamPreview.classList.add("active");
+      if (webcamNote) {
+        webcamNote.textContent = "Frames stay local. Downsampled JPEGs feed the server-side MediaPipe tracker. The avatar never displays your face.";
+        webcamNote.style.color = "";
+      }
+    }
 
     await videoEl.play();
 
@@ -104,6 +143,9 @@
     }
     if (videoEl) { videoEl.remove(); videoEl = null; }
     if (canvasEl) { canvasEl.remove(); canvasEl = null; }
+    if (webcamPreview) {
+      webcamPreview.classList.remove("active");
+    }
   }
 
   // =====================================================================
@@ -154,6 +196,9 @@
       .replace(/\bmode-\S+/g, "")
       .trim();
     avatarEmote.classList.add(`mode-${behavior.mode || "reflect"}`);
+
+    // ── Update all indicator cards ────────────────────────────────────
+    updateIndicators(behavior);
   }
 
   // --------------------------------------------------------------------
@@ -263,6 +308,84 @@
     if (clamped <= 0.4)      avatarEmote.classList.add("intensity-low");
     else if (clamped <= 0.7) avatarEmote.classList.add("intensity-mid");
     else                     avatarEmote.classList.add("intensity-high");
+  }
+
+  // =====================================================================
+  //  INDICATOR CARD UPDATES
+  // =====================================================================
+
+  function updateIndicators(behavior) {
+    // ── Affect indicator (1) ──────────────────────────────────────────
+    if (affectLabel) {
+      const affect = behavior.target_affect || "neutral";
+      affectLabel.textContent = affect.replace(/_/g, " ");
+    }
+    if (affectBarFill) {
+      const intensity = behavior.intensity ?? 0.5;
+      affectBarFill.style.width = `${intensity * 100}%`;
+      // Color gradient based on affect category
+      const aff = (behavior.target_affect || "");
+      if (/warm|smile|joy|happy/i.test(aff))
+        affectBarFill.style.background = "#fbbf24";
+      else if (/sad|consol|concern|ground/i.test(aff))
+        affectBarFill.style.background = "#818cf8";
+      else if (/angry|validat|patien/i.test(aff))
+        affectBarFill.style.background = "#34d399";
+      else if (/calm|neutral/i.test(aff))
+        affectBarFill.style.background = "#a78bfa";
+      else
+        affectBarFill.style.background = "#818cf8";
+    }
+    if (affectTransitionLabel) {
+      const prog = behavior.transition_progress ?? 1.0;
+      if (prog >= 1.0)
+        affectTransitionLabel.textContent = "settled";
+      else
+        affectTransitionLabel.textContent = `crossfading ${Math.round(prog * 100)}%`;
+    }
+
+    // ── Breath indicator (3) ──────────────────────────────────────────
+    if (breathRateDisplay) {
+      const hz = behavior.breath_rate_hz ?? 0.25;
+      const bpm = Math.round(hz * 60);
+      breathRateDisplay.textContent = `${bpm} bpm`;
+    }
+
+    // ── Gaze indicator (5) ────────────────────────────────────────────
+    if (gazeDot) {
+      const gp = behavior.gaze_point || "soft_forward";
+      const offsets = {
+        eyes: "translate(-6px, -4px)",
+        mouth: "translate(0px, 6px)",
+        away: "translate(8px, -6px)",
+        soft_forward: "translate(0px, 0px)",
+      };
+      gazeDot.style.transform = offsets[gp] || offsets.soft_forward;
+    }
+    if (gazeLabel) {
+      gazeLabel.textContent = (behavior.gaze_point || "soft_forward").replace(/_/g, " ");
+    }
+
+    // ── Head-tilt indicator (4) ───────────────────────────────────────
+    if (tiltYawVal && tiltYawFill) {
+      const yaw = Math.max(-15, Math.min(15, behavior.head_yaw || 0));
+      tiltYawVal.textContent = `${yaw.toFixed(1)}°`;
+      tiltYawFill.style.marginLeft = `${((yaw + 15) / 30) * 60}%`;
+    }
+    if (tiltPitchVal && tiltPitchFill) {
+      const pitch = Math.max(-10, Math.min(10, behavior.head_pitch || 0));
+      tiltPitchVal.textContent = `${pitch.toFixed(1)}°`;
+      tiltPitchFill.style.marginLeft = `${((pitch + 10) / 20) * 60}%`;
+    }
+
+    // ── Telemetry pills ───────────────────────────────────────────────
+    if (telemMode) telemMode.textContent = behavior.mode || "-";
+    if (telemCognitive) telemCognitive.textContent = behavior.cognitive_mode || "-";
+    if (telemSpeaking) telemSpeaking.textContent = behavior.is_speaking ? "yes" : "no";
+    if (telemIntensity) telemIntensity.textContent = ((behavior.intensity ?? 0.5) * 100).toFixed(0) + "%";
+    if (telemFace) telemFace.textContent = prevBehavior ? (prevBehavior.target_affect || "-") : "-";
+    if (telemEmote) telemEmote.textContent = behavior.emote_id || behavior.target_affect || "-";
+    if (telemMirror) telemMirror.textContent = ((behavior.mirror_strength ?? 0) * 100).toFixed(0) + "%";
   }
 
   // =====================================================================
