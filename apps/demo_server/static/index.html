@@ -3,116 +3,378 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>LiveEmote Avatar</title>
+  <title>Hermes Live Avatar — Realism Demo</title>
   <link rel="stylesheet" href="/static/demo.css">
+  <style>
+    /* ── Page layout (not part of demo.css — page chrome only) ─────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0a14;
+      color: #e0e0f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px 48px;
+    }
+    header {
+      text-align: center;
+      max-width: 720px;
+      margin-bottom: 32px;
+    }
+    header h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #c4b5fd 0%, #818cf8 50%, #67e8f9 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    header .lede {
+      margin-top: 8px;
+      font-size: 0.85rem;
+      color: #8888aa;
+      line-height: 1.5;
+    }
+
+    /* ── Main grid ────────────────────────────────────────────────── */
+    .demo-grid {
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      grid-template-rows: auto auto;
+      gap: 20px;
+      width: 100%;
+      max-width: 960px;
+    }
+    @media (max-width: 800px) {
+      .demo-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ── Panels ───────────────────────────────────────────────────── */
+    .panel {
+      background: #14142a;
+      border: 1px solid #2a2a4a;
+      border-radius: 14px;
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+    .panel h2 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #8888bb;
+      margin-bottom: 12px;
+    }
+    .panel .note {
+      font-size: 0.7rem;
+      color: #555577;
+      margin-top: 10px;
+    }
+
+    /* ── Webcam panel ─────────────────────────────────────────────── */
+    #webcam-panel {
+      grid-row: 1;
+      grid-column: 1;
+    }
+    #webcam-preview {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border-radius: 10px;
+      background: #000;
+      object-fit: cover;
+      border: 2px solid #2a2a4a;
+      transform: scaleX(-1); /* mirror */
+    }
+    #webcam-preview.active {
+      border-color: #818cf8;
+      box-shadow: 0 0 20px rgba(129, 140, 248, 0.15);
+    }
+
+    /* ── Avatar panel ──────────────────────────────────────────────── */
+    #avatar-panel {
+      grid-row: 1 / 3;
+      grid-column: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    @media (max-width: 800px) {
+      #avatar-panel { grid-row: 2; grid-column: 1; }
+    }
+
+    /* ── Indicator cards ───────────────────────────────────────────── */
+    .indicators-row {
+      grid-row: 2;
+      grid-column: 1;
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    @media (max-width: 800px) {
+      .indicators-row { grid-row: 3; }
+    }
+    .indicator-card {
+      flex: 1 1 140px;
+      background: #14142a;
+      border: 1px solid #2a2a4a;
+      border-radius: 12px;
+      padding: 14px;
+      min-width: 130px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .indicator-card h3 {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #7777aa;
+    }
+
+    /* ── Affect indicator ──────────────────────────────────────────── */
+    #affect-label {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e0e0f0;
+      text-transform: capitalize;
+    }
+    #affect-bar {
+      width: 100%;
+      height: 6px;
+      background: #1e1e3a;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    #affect-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 3px;
+      transition: width 0.3s ease, background 0.5s ease;
+      background: #818cf8;
+    }
+    #affect-transition-label {
+      font-size: 0.65rem;
+      color: #6666aa;
+    }
+
+    /* ── Breath indicator ──────────────────────────────────────────── */
+    #breath-circle {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #818cf8 0%, #312e81 60%, transparent 70%);
+      animation: breath-indicator-pulse var(--breath-duration, 4.2s) ease-in-out infinite;
+    }
+    @keyframes breath-indicator-pulse {
+      0%, 100% { transform: scale(0.7); opacity: 0.6; }
+      50%      { transform: scale(1.0); opacity: 1.0; }
+    }
+    #breath-rate-display {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #c4b5fd;
+    }
+
+    /* ── Gaze indicator ────────────────────────────────────────────── */
+    #gaze-visual {
+      position: relative;
+      width: 60px;
+      height: 36px;
+      background: #1a1a30;
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #gaze-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #67e8f9;
+      transition: transform 0.25s ease;
+    }
+    #gaze-label {
+      font-size: 0.75rem;
+      color: #aaaadd;
+    }
+
+    /* ── Head-tilt indicator ───────────────────────────────────────── */
+    #head-tilt-display {
+      display: flex;
+      gap: 12px;
+    }
+    .tilt-axis {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+    .tilt-axis .axis-label {
+      font-size: 0.6rem;
+      color: #6666aa;
+      text-transform: uppercase;
+    }
+    .tilt-axis .axis-value {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #a5b4fc;
+    }
+    .tilt-axis .axis-bar {
+      width: 40px;
+      height: 4px;
+      background: #1e1e3a;
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+    .tilt-axis .axis-bar-fill {
+      height: 100%;
+      width: 50%;
+      background: #818cf8;
+      border-radius: 2px;
+      transition: margin-left 0.3s ease;
+    }
+
+    /* ── Telemetry mini ────────────────────────────────────────────── */
+    #telemetry {
+      grid-column: 1 / -1;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .telemetry-pill {
+      font-size: 0.65rem;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: #1a1a32;
+      border: 1px solid #2a2a4a;
+      color: #8888bb;
+      white-space: nowrap;
+    }
+    .telemetry-pill strong { color: #c4b5fd; }
+  </style>
 </head>
 <body>
+
   <header>
-    <h1>LiveEmote — affect-keyed live avatar</h1>
+    <h1>Hermes Live Avatar</h1>
     <p class="lede">
-      Real LLM-driven avatar with its <em>own</em> face and voice. Your webcam is
-      read as a <strong>focus + energy signal</strong>, never as a face to copy
-      or swap. The avatar mirrors/reflects your affect (delayed, damped, never
-      literal) and speaks back through the configured LLM with structured
-      voice + emotion tags.
+      All six realism dimensions running: emotional inertia, idle micro‑movements,
+      breathing entrainment, head‑tilt mirroring, gaze triangle, and anticipatory
+      micro‑expressions. Your webcam drives the perception pipeline — the avatar
+      responds with psychologically‑grounded affect, never a literal copy.
     </p>
   </header>
-  <main>
-    <section class="stage">
-      <div class="panel">
-        <h2>Webcam (signal source)</h2>
-        <video id="webcam" autoplay muted playsinline></video>
-        <p class="note">Frames stay local. The browser streams downsampled JPEGs to the server-side perception tracker; the avatar never displays your face.</p>
-      </div>
-      <div class="panel avatar">
-        <h2>Avatar output</h2>
-        <div id="avatarCanvas">
-          <div id="avatarPortrait"><span id="avatarFallback">◉‿◉</span></div>
-          <img id="avatarEmote" alt="" hidden>
-          <small id="watermark">Synthetic avatar output — identity is the chosen character, not the user on webcam.</small>
+
+  <!-- ================================================================= -->
+  <!--  MAIN GRID                                                        -->
+  <!-- ================================================================= -->
+  <div class="demo-grid">
+
+    <!-- ── Webcam preview ────────────────────────────────────────────── -->
+    <section class="panel" id="webcam-panel">
+      <h2>Webcam (perception source)</h2>
+      <video id="webcam-preview" autoplay muted playsinline></video>
+      <p class="note" id="webcam-note">
+        Frames stay local. Downsampled JPEGs feed the server-side MediaPipe tracker.
+        The avatar <em>never</em> displays your face.
+      </p>
+    </section>
+
+    <!-- ── Avatar canvas ─────────────────────────────────────────────── -->
+    <section class="panel" id="avatar-panel">
+      <h2>Avatar Output</h2>
+
+      <!-- Matches demo.css selectors: #avatar-container, #avatar-emote, .avatar-face, .avatar-body -->
+      <div id="avatar-container">
+        <div id="avatar-emote" class="affect-neutral intensity-mid">
+          <div class="avatar-face">
+            <div class="avatar-body">
+              <div class="avatar-neck">
+                <!-- Eyes for gaze triangle (CSS targets .eye-left / .eye-right) -->
+                <div class="eye-left"></div>
+                <div class="eye-right"></div>
+                <!-- Mouth placeholder -->
+                <div class="avatar-mouth"></div>
+                <!-- Fallback when no character asset loaded -->
+                <span id="avatar-fallback">◉‿◉</span>
+              </div>
+            </div>
+          </div>
         </div>
-        <audio id="speech" controls></audio>
-        <canvas id="captureCanvas" width="320" height="180" hidden></canvas>
       </div>
+
+      <p class="note" id="avatar-note">
+        Synthetic avatar — identity is the chosen character, not the user.
+      </p>
     </section>
-    <section class="perception-summary">
-      <h2>Live affect signals</h2>
-      <dl class="affect">
-        <dt>Tracker</dt><dd id="trackerKind">-</dd>
-        <dt>Available</dt><dd id="trackerAvailable">-</dd>
-        <dt>Focus / attention</dt><dd id="attentionMeter">-</dd>
-        <dt>Energy / arousal</dt><dd id="arousalMeter">-</dd>
-        <dt>Valence</dt><dd id="valenceMeter">-</dd>
-        <dt>Tension</dt><dd id="tensionMeter">-</dd>
-        <dt>Head pose variance</dt><dd id="poseVar">-</dd>
-        <dt>Blink rate</dt><dd id="blinkRate">-</dd>
-      </dl>
-    </section>
-    <section class="controls identity-controls">
-      <label>Character
-        <select id="characterSelect"></select>
-      </label>
-      <label>Style
-        <select id="styleSelect"></select>
-      </label>
-      <label>Background
-        <select id="backgroundSelect"></select>
-      </label>
-      <label class="inline-check"><input id="syncBackground" type="checkbox" checked> Sync background to style</label>
-      <label>Workflow
-        <select id="workflowSelect"></select>
-      </label>
-    </section>
-    <section class="controls">
-      <button id="speak">Speak test line</button>
-      <button id="toggle">Toggle mirror/reflect</button>
-      <button data-trigger="listening">Trigger listening</button>
-      <button data-trigger="thinking">Trigger thinking</button>
-      <button data-trigger="interrupt">Interrupt speech</button>
-      <button data-trigger="reset">Reset state</button>
-    </section>
-    <section class="panel character-controls">
-      <h2>Scene characters</h2>
-      <p class="note">Switch between discovered local character folders without restarting the server. Each character's canonical still is the avatar's own face.</p>
-      <div class="character-row"><select id="characterPathSelect"></select><button id="selectCharacter">Load character</button></div>
-    </section>
-    <section class="panel meeting-test">
-      <h2>Google Meet WebRTC test mode</h2>
-      <p class="note">Paste a Google Meet URL to route the avatar through the WebRTC meeting path and see join latency.</p>
-      <div class="meeting-row">
-        <input id="meetingUrl" type="url" inputmode="url" placeholder="https://meet.google.com/abc-defg-hij">
-        <input id="meetingName" type="text" placeholder="LiveEmote Avatar" value="LiveEmote Avatar">
-        <button id="joinMeeting">Join Meet</button>
-        <button id="leaveMeeting" class="secondary">Leave</button>
+
+    <!-- ── Indicator cards ───────────────────────────────────────────── -->
+    <div class="indicators-row">
+
+      <!-- Affect indicator (1: emotional inertia) -->
+      <div class="indicator-card" id="affect-card">
+        <h3>Affect</h3>
+        <div id="affect-label">neutral</div>
+        <div id="affect-bar"><div id="affect-bar-fill"></div></div>
+        <div id="affect-transition-label">settled</div>
       </div>
-      <dl class="meeting-status">
-        <dt>Meeting status</dt><dd id="meetingStatus">idle</dd>
-        <dt>Join latency</dt><dd id="meetingLatency">-</dd>
-        <dt>Details</dt><dd id="meetingDetail">Paste a Meet URL to start.</dd>
-      </dl>
-    </section>
-    <section class="debug">
-      <h2>Runtime telemetry</h2>
-      <dl>
-        <dt>Mode</dt><dd id="mode">-</dd>
-        <dt>Affect</dt><dd id="affect">-</dd>
-        <dt>VAD</dt><dd id="vad">-</dd>
-        <dt>Face detected</dt><dd id="face">-</dd>
-        <dt>Gaze target</dt><dd id="gaze">-</dd>
-        <dt>Confidence</dt><dd id="confidence">-</dd>
-        <dt>Body pose</dt><dd id="bodyPose">-</dd>
-        <dt>Voice</dt><dd id="voiceStatus">-</dd>
-        <dt>Renderer</dt><dd id="rendererStatus">-</dd>
-        <dt>Active emote</dt><dd id="emote">-</dd>
-        <dt>Policy</dt><dd id="policy">-</dd>
-        <dt>Character</dt><dd id="character">-</dd>
-        <dt>Style</dt><dd id="style">-</dd>
-        <dt>Background</dt><dd id="background">-</dd>
-      </dl>
-      <h3>Agent response</h3><pre id="response"></pre>
-      <h3>Raw state</h3><pre id="raw"></pre>
-    </section>
-  </main>
+
+      <!-- Breath indicator (3: breathing entrainment) -->
+      <div class="indicator-card" id="breath-card">
+        <h3>Breath</h3>
+        <div id="breath-circle"></div>
+        <div id="breath-rate-display">15 bpm</div>
+      </div>
+
+      <!-- Gaze indicator (5: gaze triangle) -->
+      <div class="indicator-card" id="gaze-card">
+        <h3>Gaze</h3>
+        <div id="gaze-visual"><div id="gaze-dot"></div></div>
+        <div id="gaze-label">soft_forward</div>
+      </div>
+
+      <!-- Head-tilt indicator (4: head tilt mirroring) -->
+      <div class="indicator-card" id="headtilt-card">
+        <h3>Head Tilt</h3>
+        <div id="head-tilt-display">
+          <div class="tilt-axis">
+            <span class="axis-label">Yaw</span>
+            <span class="axis-value" id="tilt-yaw-val">0°</span>
+            <div class="axis-bar"><div class="axis-bar-fill" id="tilt-yaw-fill"></div></div>
+          </div>
+          <div class="tilt-axis">
+            <span class="axis-label">Pitch</span>
+            <span class="axis-value" id="tilt-pitch-val">0°</span>
+            <div class="axis-bar"><div class="axis-bar-fill" id="tilt-pitch-fill"></div></div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- .indicators-row -->
+
+  </div><!-- .demo-grid -->
+
+  <!-- ================================================================= -->
+  <!--  TELEMETRY PILLS                                                   -->
+  <!-- ================================================================= -->
+  <div id="telemetry" style="margin-top:20px; grid-column:1/-1;">
+    <span class="telemetry-pill">Mode <strong id="telem-mode">-</strong></span>
+    <span class="telemetry-pill">Policy <strong id="telem-policy">-</strong></span>
+    <span class="telemetry-pill">Cognitive <strong id="telem-cognitive">-</strong></span>
+    <span class="telemetry-pill">Speaking <strong id="telem-speaking">-</strong></span>
+    <span class="telemetry-pill">Intensity <strong id="telem-intensity">-</strong></span>
+    <span class="telemetry-pill">Face <strong id="telem-face">-</strong></span>
+    <span class="telemetry-pill">Emote <strong id="telem-emote">-</strong></span>
+    <span class="telemetry-pill">Mirror <strong id="telem-mirror">-</strong></span>
+  </div>
+
   <script src="/static/demo.js"></script>
 </body>
 </html>
