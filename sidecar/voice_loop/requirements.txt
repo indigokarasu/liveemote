@@ -1,0 +1,15 @@
+# Voice-loop sidecar — Hugging Face speech-to-speech pipeline.
+#
+# Install into a dedicated venv (the pipeline needs torch, so keep it out of
+# the main LiveEmote environment):
+#
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -r sidecar/voice_loop/requirements.txt
+#
+# Torch is intentionally NOT pinned here: install the build for your machine
+# (macOS: `pip install torch` gives CPU/MPS; Linux GPU users should follow
+# pytorch.org for the CUDA wheel) BEFORE or AFTER this file — pip resolves it.
+speech-to-speech>=0.1.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0

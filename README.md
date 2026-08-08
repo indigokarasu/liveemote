@@ -91,6 +91,32 @@ Without ``[perception]`` the runtime still imports; the tracker degrades to
 ``NullFaceTracker`` and the avatar still mirrors/reflects from whatever
 fallback signals it sees.
 
+## Voice loop & meeting transcription (sidecars)
+
+Two optional sidecar daemons give the avatar a real spoken conversation
+channel and meeting transcription — each in its own process because they need
+torch / newer-Python stacks the main server deliberately avoids:
+
+* **Voice loop** — `sidecar/voice_loop/` wraps the Hugging Face
+  [`speech-to-speech`](https://github.com/huggingface/speech-to-speech)
+  pipeline (Silero VAD → STT → LLM → TTS, OpenAI-Realtime-compatible WS on
+  :8765). The sidecar supervisor runs on :8766; the main server's
+  `VoiceLoopClient` relays the browser's `/ws/voice` socket to the pipeline
+  and snoops transcripts/audio so the avatar animates while it listens and
+  replies. Start the demo with `--voice-loop`.
+* **Meeting diarization** — `sidecar/moss_daemon.py` wraps
+  [`MOSS-Transcribe-Diarize`](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize)
+  (transcription + speaker diarization + timestamps in one pass) on :8899;
+  the main server exposes `POST /api/transcribe` for audio uploads. The demo
+  page has a **Meeting Transcript** panel that records a clip or uploads an
+  audio file and renders the diarized turns (speaker chips + timestamps).
+
+See `sidecar/voice_loop/README.md` for the voice-loop env vars
+(`VOICE_LOOP__*`, falling back to `OPENAI_COMPATIBLE_*` for the LLM) and
+`sidecar/moss_daemon.py` for the MOSS sidecar env vars (`MOSS__SIDECAR__*`).
+Both report through `/api/status` and `/api/health` (`voice_loop` and
+`diarization` components) and degrade gracefully when the sidecar is down.
+
 ## Architecture
 
 ```

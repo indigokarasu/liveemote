@@ -161,6 +161,63 @@ class AppConfig(BaseModel):
     hardware_profile: dict[str, Any] | None = None
     debug: bool = False
 
+def _parse_env_value(raw: str) -> bool | int | float | str:
+    """Coerce an environment-variable string to the most specific Python type.
+
+    Resolution order: bool → int → float → string.
+    """
+    lower = raw.lower().strip()
+    # bool
+    if lower in ("true", "false"):
+        return lower == "true"
+    if lower in ("1", "0"):
+        return lower == "1"
+    if lower in ("yes", "no"):
+        return lower == "yes"
+    # int
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        pass
+    # float
+    try:
+        v = float(raw)
+        if raw.strip().lstrip("-").replace(".", "", 1).isdigit() or raw.strip().lstrip("-").lstrip("0") in {"", "."}:
+            return v
+    except (ValueError, TypeError):
+        pass
+    # Treat any string that looks like a float via Python's parser as float
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        pass
+    # string fallback
+    return raw
+
+
+def _load_env_config(prefix: str = "") -> dict[str, Any]:
+    """Build a nested dict from environment variables using the double-underscore
+    convention.  ``AFFECT__UPDATE_HZ=60`` → ``{"affect": {"update_hz": 60}}``.
+
+    This is callable directly by tests so they can assert the mapping logic.
+    """
+    result: dict[str, Any] = {}
+    for key, value in os.environ.items():
+        if prefix and not key.startswith(prefix.upper()):
+            continue
+        stripped = key[len(prefix):] if prefix else key
+        if "__" not in stripped:
+            continue
+        parts = [p.lower() for p in stripped.split("__")]
+        d = result
+        for part in parts[:-1]:
+            if part not in d or not isinstance(d.get(part), dict):
+                d[part] = {}
+            d = d[part]
+        d[parts[-1]] = _parse_env_value(value)
+    return result
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():

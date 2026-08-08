@@ -1,5 +1,5 @@
 from __future__ import annotations
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pathlib import Path
 from pydantic import BaseModel
@@ -134,6 +134,18 @@ def build_router(static_dir: str) -> APIRouter:
     async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+    @router.get("/api/character/asset")
+    def character_asset(path: str, request: Request) -> Response:
+        """Serve only assets belonging to a discovered character catalog entry."""
+        asset_path = Path(path).resolve()
+        orchestrator = request.app.state.orchestrator
+        roots = [Path(root).resolve() for root in orchestrator.character_roots.values()]
+        if not any(asset_path.is_relative_to(root) for root in roots):
+            raise HTTPException(status_code=403, detail="Character asset path is outside the catalog")
+        if not asset_path.is_file():
+            raise HTTPException(status_code=404, detail="Character asset not found")
+        return FileResponse(str(asset_path))
+
     @router.get("/api/audio")
     def audio(path: str, request: Request) -> Response:
         audio_path = Path(path).resolve()
@@ -145,6 +157,19 @@ def build_router(static_dir: str) -> APIRouter:
         if not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio not found")
         return FileResponse(str(audio_path), media_type="audio/wav")
+
+    @router.get("/api/voice_loop/status")
+    def voice_loop_status(request: Request) -> dict:
+        """Cached voice-loop + diarization sidecar status."""
+        return request.app.state.orchestrator.voice_status()
+
+    @router.post("/api/transcribe")
+    async def transcribe(request: Request, audio: UploadFile = File(...)) -> dict:
+        """Upload an audio recording; returns MOSS diarized segments."""
+        data = await audio.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="empty audio upload")
+        return await request.app.state.orchestrator.diarize(data, filename=audio.filename or "upload.wav")
 
     @router.get("/api/status")
     def status(request: Request) -> dict:
@@ -238,6 +263,16 @@ def build_router(static_dir: str) -> APIRouter:
         orchestrator = request.app.state.orchestrator
         return orchestrator.reload_config()
 
+    @router.get("/api/perception/info")
+    def perception_info(request: Request) -> dict:
+        tracker = request.app.state.orchestrator.tracker
+        return {
+            "available": tracker.is_available(),
+            "backend": tracker.kind(),
+            "no_face_reenactment": True,
+            "no_face_swap": True,
+        }
+
     @router.post("/api/perception/video")
     def perception_video(payload: PerceptionFrameRequest, request: Request) -> dict:
         """Accept a browser-submitted webcam frame and feed it into the affect runtime.
@@ -323,6 +358,34 @@ def build_router(static_dir: str) -> APIRouter:
         except Exception as exc:
             components["voice_backend"] = {"status": "degraded", "detail": {"error": str(exc)}}
         mark(components["voice_backend"]["status"])
+
+        # --- voice loop (speech-to-speech sidecar) ---
+        # Enabled + unreachable = degraded; disabled is a valid configuration
+        # (the typed-speak path still works), so it reports ok with
+        # enabled=False in the detail.
+        try:
+            vl = orchestrator.voice_loop.capability_status()
+            vl_degraded = bool(vl.get("enabled", False)) and (
+                vl.get("degraded", False) or not vl.get("reachable", False)
+            )
+            components["voice_loop"] = {
+                "status": "degraded" if vl_degraded else "ok",
+                "detail": vl,
+            }
+        except Exception as exc:
+            components["voice_loop"] = {"status": "degraded", "detail": {"error": str(exc)}}
+        mark(components["voice_loop"]["status"])
+
+        # --- diarization (MOSS sidecar) ---
+        try:
+            dz = orchestrator.diarizer.capability_status()
+            components["diarization"] = {
+                "status": "degraded" if dz.get("degraded", True) else "ok",
+                "detail": dz,
+            }
+        except Exception as exc:
+            components["diarization"] = {"status": "degraded", "detail": {"error": str(exc)}}
+        mark(components["diarization"]["status"])
 
         # --- protocol agent (LLM/cognition subsystem) ---
         # Surfaces the OpenAI-compatible adapter's breaker + retry
