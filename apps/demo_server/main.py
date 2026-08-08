@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 from fastapi.staticfiles import StaticFiles
 from .routes import build_router, REQUEST_COUNT, REQUEST_LATENCY
 from .websocket_api import websocket_endpoint
+from .voice_ws import voice_websocket_endpoint
 from hermes_avatar.demo.demo_orchestrator import DemoOrchestrator
 
 def create_app(args=None) -> FastAPI:
@@ -37,20 +38,42 @@ def create_app(args=None) -> FastAPI:
     
     static = Path(__file__).with_name("static")
     agent_mode = getattr(args, "agent_mode", None) or getattr(args, "hermes_mode", None) or "fake"
-    app.state.orchestrator = DemoOrchestrator(args.character, args.renderer, args.voice_backend, agent_mode, agent_url=getattr(args, "agent_url", None), agent_harness=getattr(args, "agent_harness", "generic"))
+    app.state.orchestrator = DemoOrchestrator(
+        args.character,
+        args.renderer,
+        args.voice_backend,
+        agent_mode,
+        agent_url=getattr(args, "agent_url", None),
+        agent_harness=getattr(args, "agent_harness", "generic"),
+        perception_tracker=getattr(args, "perception_tracker", "mediapipe"),
+        voice_loop_enabled=getattr(args, "voice_loop_enabled", False),
+        voice_loop_control_url=getattr(args, "voice_loop_control_url", None),
+        voice_loop_pipeline_url=getattr(args, "voice_loop_pipeline_url", None),
+        moss_sidecar_url=getattr(args, "moss_sidecar_url", None),
+    )
     app.mount("/static", StaticFiles(directory=str(static)), name="static")
     app.include_router(build_router(str(static)))
     app.websocket("/ws")(websocket_endpoint)
+    app.websocket("/ws/voice")(voice_websocket_endpoint)
     return app
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--character", default="./character_input")
-    p.add_argument("--renderer", default="livetalking", choices=["livetalking", "deeplivecam"])
+    p.add_argument("--renderer", default="web", choices=["web", "livetalking", "deeplivecam", "facefusion"])
     p.add_argument("--voice-backend", default="luxtts", choices=["luxtts", "elevenlabs", "fishaudio", "moss", "none"])
-    p.add_argument("--agent-mode", default=None, choices=["fake", "external", "offline", "none", "openclaw", "hermes", "deerflow"])
+    p.add_argument("--agent-mode", default=None, choices=["fake", "external", "offline", "none", "openai_compatible", "openai-compatible", "openclaw", "hermes", "deerflow"])
     p.add_argument("--agent-url", default=None)
     p.add_argument("--agent-harness", default="generic")
+    p.add_argument("--perception-tracker", default="mediapipe", choices=["mediapipe", "null"])
+    p.add_argument("--voice-loop", dest="voice_loop_enabled", action="store_true",
+                   help="Enable the speech-to-speech voice loop (browser mic -> sidecar pipeline)")
+    p.add_argument("--voice-loop-control-url", default=None,
+                   help="Voice-loop sidecar control plane (default http://127.0.0.1:8766)")
+    p.add_argument("--voice-loop-pipeline-url", default=None,
+                   help="Pipeline realtime WS (default ws://127.0.0.1:8765/v1/realtime)")
+    p.add_argument("--moss-sidecar-url", default=None,
+                   help="MOSS diarization sidecar (default http://127.0.0.1:8899)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
     return p.parse_args()

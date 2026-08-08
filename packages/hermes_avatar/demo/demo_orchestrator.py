@@ -16,12 +16,15 @@ from hermes_avatar.protocol.agent_bridge import AgentBridge
 from hermes_avatar.renderer.deeplivecam_adapter import DeepLiveCamAdapter
 from hermes_avatar.renderer.facefusion_adapter import FaceSwapAdapter
 from hermes_avatar.renderer.livetalking_adapter import LiveTalkingAdapter
+from hermes_avatar.renderer.web_renderer import WebRenderer
 from hermes_avatar.voice.base import VoiceBackend, VoiceStyle
 from hermes_avatar.voice.elevenlabs_adapter import ElevenLabsAdapter
 from hermes_avatar.voice.emotion_tag_processor import EmotionTagProcessor
 from hermes_avatar.voice.fishaudio_adapter import FishAudioAdapter
 from hermes_avatar.voice.luxtts_adapter import LuxTTSAdapter
+from hermes_avatar.voice.moss_diarizer import MossDiarizer
 from hermes_avatar.voice.noop_adapter import NoopVoiceAdapter
+from hermes_avatar.voice.voice_loop import VoiceLoopClient
 from hermes_avatar.renderer.wav2lip_adapter import Wav2LipAdapter
 from prometheus_client import Counter, Histogram
 
@@ -114,6 +117,11 @@ class DemoOrchestrator:
         config: AppConfig | None = None,
         agent_url: str | None = None,
         agent_harness: str = "generic",
+        perception_tracker: str = "mediapipe",
+        voice_loop_enabled: bool = False,
+        voice_loop_control_url: str | None = None,
+        voice_loop_pipeline_url: str | None = None,
+        moss_sidecar_url: str | None = None,
     ) -> None:
         self.config = config or load_config()
         self.character_roots, self.character_catalog = discover_character_catalog(character)
@@ -143,6 +151,11 @@ class DemoOrchestrator:
                 backend=renderer,
                 enabled=self.config.faceswap.enabled,
             )
+        elif renderer == "web":
+            # The browser renderer is self-contained: it exposes the active
+            # character assets and behavior state to the demo UI without
+            # requiring a LiveTalking daemon on 127.0.0.1.
+            self.renderer = WebRenderer()
         else:
             self.renderer = LiveTalkingAdapter(self.config.renderer.livetalking_url)
         self.renderer.load_character(self.index)
@@ -153,9 +166,19 @@ class DemoOrchestrator:
             enabled=getattr(self.config, "wav2lip_enabled", False),
         )
         self.emotion_processor = EmotionTagProcessor()
-        self.tracker: MediaPipeFaceTracker | NullFaceTracker = build_tracker("mediapipe")
+        self.tracker: MediaPipeFaceTracker | NullFaceTracker = build_tracker(perception_tracker)
         self.last_response_text = ""
         self.meeting = MeetingJoinService(self.renderer)
+        # --- voice loop + diarization sidecars (lazy clients) ----------
+        self.voice_loop_enabled = voice_loop_enabled
+        self.voice_loop_control_url = voice_loop_control_url
+        self.voice_loop_pipeline_url = voice_loop_pipeline_url
+        self.moss_sidecar_url = moss_sidecar_url
+        self._voice_loop: VoiceLoopClient | None = None
+        self._diarizer: MossDiarizer | None = None
+        self.last_voice_user_text = ""
+        self.last_voice_assistant_text = ""
+        self.last_diarized_turns: list[dict] = []
 
     def _voice_backend(self, backend: str) -> VoiceBackend:
         normalized = (backend or "none").lower().replace("_", "-")
@@ -201,6 +224,98 @@ class DemoOrchestrator:
         self.runtime = self._new_runtime()
         self.runtime.avatar = self._neutral_avatar_state()
 
+    @property
+    def voice_loop(self) -> VoiceLoopClient:
+        """Lazily-constructed client for the speech-to-speech sidecar."""
+        if self._voice_loop is None:
+            self._voice_loop = VoiceLoopClient(
+                enabled=self.voice_loop_enabled,
+                control_url=self.voice_loop_control_url,
+                pipeline_ws_url=self.voice_loop_pipeline_url,
+            )
+        return self._voice_loop
+
+    @property
+    def diarizer(self) -> MossDiarizer:
+        """Lazily-constructed client for the MOSS diarization sidecar."""
+        if self._diarizer is None:
+            self._diarizer = MossDiarizer(sidecar_url=self.moss_sidecar_url)
+        return self._diarizer
+
+    # ------------------------------------------------------------------
+    #  Voice-loop hooks — the /ws/voice relay calls these so the avatar
+    #  animates in lockstep with the spoken conversation: engaged listening
+    #  while the user talks, and a warm affect with congruent intensity
+    #  (blended from the current perception arousal) while its own voice
+    #  replies. All hooks are async so the relay can await them directly;
+    #  each one is a normal runtime tick, so failures degrade to a no-op.
+    # ------------------------------------------------------------------
+    def voice_status(self) -> dict:
+        """Cached, non-raising voice-loop + diarization status surface."""
+        try:
+            loop_status = self.voice_loop.capability_status()
+        except Exception as exc:  # pragma: no cover - defensive
+            loop_status = {"enabled": self.voice_loop_enabled, "degraded": True, "reason": str(exc)}
+        try:
+            diarization_status = self.diarizer.capability_status()
+        except Exception as exc:  # pragma: no cover - defensive
+            diarization_status = {"degraded": True, "reason": str(exc)}
+        return {
+            **loop_status,
+            "last_user_transcript": self.last_voice_user_text,
+            "last_assistant_text": self.last_voice_assistant_text,
+            "diarization": diarization_status,
+            "last_diarized_turns": self.last_diarized_turns,
+        }
+
+    async def on_voice_user_transcript(self, text: str) -> None:
+        """The user just spoke a turn (STT from the pipeline)."""
+        self.last_voice_user_text = (text or "").strip()
+        self.runtime.conversation.turn_state = "user_turn"
+        self.runtime.tick(int(time.time() * 1000))
+        self.renderer.set_behavior(self.runtime.avatar)
+
+    async def on_voice_assistant_text(self, text: str) -> None:
+        """Live assistant text (for the transcript line on the demo page)."""
+        self.last_voice_assistant_text = (text or "").strip()
+
+    async def on_voice_speaking_start(self) -> None:
+        """The avatar's own voice started; animate a warm, congruent affect."""
+        self.runtime.conversation.turn_state = "assistant_speaking"
+        user = self.runtime.user
+        arousal = float(getattr(user, "arousal", 0.5) or 0.5)
+        valence = float(getattr(user, "valence", 0.2) or 0.2)
+        # Psychology: the avatar matches the user's energy (arousal) but not
+        # their exact emotion — high-energy-positive stays light (amused),
+        # high-energy-negative softens (reassuring), otherwise warm.
+        intensity = max(0.25, min(0.85, 0.35 + 0.4 * arousal))
+        if valence > 0.55 and arousal > 0.55:
+            affect = "amused"
+        elif valence < 0.25:
+            affect = "reassuring"
+        else:
+            affect = "warm"
+        self.runtime.hermes_tags = {
+            "affect": affect,
+            "voice": {"pace": 0.46, "warmth": 0.7, "intensity": round(intensity, 3)},
+        }
+        behavior = self.runtime.tick(int(time.time() * 1000))
+        self.renderer.set_behavior(behavior)
+
+    async def on_voice_speaking_end(self) -> None:
+        """The avatar's voice finished; return to the perception-driven state."""
+        self.runtime.conversation.turn_state = "idle"
+        self.runtime.hermes_tags = {}
+        behavior = self.runtime.tick(int(time.time() * 1000))
+        self.renderer.set_behavior(behavior)
+
+    async def diarize(self, audio_bytes: bytes, *, filename: str = "upload.wav") -> dict:
+        """Transcribe + diarize an uploaded recording via the MOSS sidecar."""
+        result = await self.diarizer.diarize_async(audio_bytes, filename=filename)
+        if result.available and result.segments:
+            self.last_diarized_turns = [s.to_dict() for s in result.segments]
+        return result.to_dict()
+
     def status(self) -> dict:
         # Heartbeat tick: pulse the affect runtime so the staleness clock
         # advances even when perception events stop arriving. The browser
@@ -240,6 +355,7 @@ class DemoOrchestrator:
             "active_background": asdict(self.active_background()) if self.active_background() is not None else None,
             "capabilities": self.capabilities(),
             "meeting": self.meeting.status(),
+            "voice_loop": self.voice_status(),
         }
 
     def character_options(self) -> list[dict]:
@@ -262,7 +378,12 @@ class DemoOrchestrator:
             "timestamp_ms": timestamp_ms,
         })
         self.renderer.set_behavior(behavior)
-        return {"signals": signals.to_dict(), "avatar": behavior.to_dict() if hasattr(behavior, "to_dict") else {}}
+        return {
+            "available": self.tracker.is_available(),
+            "tracker": self.tracker.kind(),
+            "signals": signals.to_dict(),
+            "avatar": behavior.to_dict() if hasattr(behavior, "to_dict") else {},
+        }
 
     def capabilities(self) -> dict:
         renderer_caps = self.renderer.capabilities() if hasattr(self.renderer, "capabilities") else {"backend": type(self.renderer).__name__}
@@ -279,6 +400,8 @@ class DemoOrchestrator:
             "mobile_layout": True,
             "multi_character_switching": True,
             "cloud_manifest_available": True,
+            "voice_loop": self.voice_loop.capability_status(),
+            "diarization": self.diarizer.capability_status(),
         }
 
     def apply_event(self, event: dict) -> dict:

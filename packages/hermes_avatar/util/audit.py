@@ -167,6 +167,12 @@ def reset(*names: str | None) -> None:
                     _EVENTS.pop(n, None)
 
 
+# Backward-compatible name used by the health endpoint and older integrations.
+# Keep ``snapshot`` as the canonical implementation while allowing callers to
+# use the more explicit audit-specific spelling.
+audit_snapshot = snapshot
+
+
 def consume_recent(name: str, limit: int = 50) -> list[dict[str, Any]]:
     """Return an OK-level log-stream snapshot stub.
 
