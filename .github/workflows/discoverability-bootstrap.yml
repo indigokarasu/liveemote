@@ -1,21 +1,19 @@
 name: Repository discoverability bootstrap
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
+    paths:
+      - .github/workflows/discoverability-bootstrap.yml
 permissions:
   contents: write
   issues: write
 jobs:
-  metadata:
+  discoverability:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Repository description and topics
-        run: |
-          gh api --method PATCH "repos/$REPO" -f description='LiveEmote: real-time AI avatar driven by user focus and energy signals, with independent face, voice, affect, and LLM responses.'
-          gh api --method PUT "repos/$REPO/topics" -H "Accept: application/vnd.github+json" -F 'names[]=ai-avatar' -F 'names[]=avatar' -F 'names[]=computer-vision' -F 'names[]=fastapi' -F 'names[]=hermes-agent' -F 'names[]=llm' -F 'names[]=mediapipe' -F 'names[]=real-time' -F 'names[]=text-to-speech'
       - name: Standard labels
         continue-on-error: true
         run: |
