@@ -1,5 +1,7 @@
 # liveemote
 
+**LiveEmote is a real-time AI avatar system combining computer vision, affect sensing, LLM responses, and local or hosted text-to-speech.**
+
 > A real AI live avatar whose motion is keyed off *you*, without ever copying
 > *you*. The avatar has its own face and voice; your webcam is read as a
 > focus + energy signal that shapes its affect — never as a face to
